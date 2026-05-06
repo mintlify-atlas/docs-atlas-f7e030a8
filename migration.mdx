@@ -1,0 +1,243 @@
+---
+title: "Migrating to APScheduler 4 from v3"
+description: "Step-by-step guide to migrating your APScheduler code from the 3.x series to v4, covering terminology, API, and behavioral changes."
+---
+
+APScheduler 4 is a significant rewrite that changes core concepts, the public API, and several behaviors from the 3.x series. This guide walks through every breaking change you need to address before upgrading, as well as briefer notes on the older v3.0→v3.2 and v2.x→v3.0 transitions for historical reference.
+
+<Warning>
+  There is currently no automatic import path for schedules stored in a persistent v3.x job store. Manual migration or a fresh start is required.
+</Warning>
+
+---
+
+## From v3.x to v4.0
+
+### Terminology and architectural changes
+
+In v3, the single `Job` concept covered everything: the callable, its schedule, and the individual execution request. v4 splits this into three distinct objects:
+
+| v3 concept | v4 equivalent | Description |
+|---|---|---|
+| Job (the callable + config) | **Task** | The callable and its configuration parameters. |
+| Job (the schedule) | **Schedule** | Combines a task with a trigger and recurrence settings. |
+| Job (the execution) | **Job** | A single execution request for a task. |
+
+Read the documentation for `Task`, `Schedule`, and `Job` to understand how they interact.
+
+**Data stores** (previously called *job stores*) have been redesigned to support multiple concurrent schedulers and workers, enabling both horizontal scalability and fault tolerance. Several backends were dropped because they could not satisfy the new requirements.
+
+**Event brokers** are a brand-new component in v4. They relay events between schedulers and workers so that they can cooperate over a shared data store. An external event broker (Redis, MQTT, asyncpg, psycopg) is required in multi-node or multi-process deployments.
+
+<Note>
+  Single-process deployments continue to work with the default in-process event broker — no external service is required.
+</Note>
+
+**Triggers are now stateful.** This change was necessary to properly support combining triggers (`AndTrigger` and `OrTrigger`), which must track the internal state of each child trigger between calls. It also enables more sophisticated custom trigger implementations. Triggers can no longer be shared across multiple schedules.
+
+**Time zone support** has been revamped. APScheduler now uses the standard library `zoneinfo` module (or `backports.zoneinfo` on Python < 3.9) instead of pytz. Stop using pytz with APScheduler — pass `zoneinfo.ZoneInfo("America/New_York")` wherever a timezone is required.
+
+<Warning>
+  Remove all pytz imports from your scheduling code. The two timezone APIs are not interchangeable and mixing them will produce incorrect or confusing results.
+</Warning>
+
+**Entry points** are no longer used or supported. In v3, trigger and job store classes could be referenced as strings (e.g., `"cron"` for `CronTrigger`) via setuptools entry points. This caused problems with tools like PyInstaller and py2exe that do not bundle distribution metadata. In v4 you must import and instantiate triggers and data stores explicitly.
+
+```python
+# v3 — string alias via entry point
+scheduler.add_job(my_func, "cron", hour=10)
+
+# v4 — explicit instantiation
+from apscheduler.triggers.cron import CronTrigger
+scheduler.add_schedule(my_func, CronTrigger(hour=10))
+```
+
+---
+
+### Scheduler changes
+
+<Warning>
+  `BlockingScheduler`, `BackgroundScheduler`, `AsyncIOScheduler`, and all other v3 scheduler classes have been removed. Only `Scheduler` and `AsyncScheduler` remain.
+</Warning>
+
+**`BlockingScheduler` and `BackgroundScheduler`** have been merged into a single `Scheduler` class. The new class has two methods that replace `start()`:
+
+| v3 | v4 |
+|---|---|
+| `BlockingScheduler().start()` | `scheduler.run_until_stopped()` |
+| `BackgroundScheduler().start()` | `scheduler.start_in_background()` |
+
+```python
+# v3 — blocking
+scheduler = BlockingScheduler()
+scheduler.start()
+
+# v4 — blocking
+with Scheduler() as scheduler:
+    scheduler.run_until_stopped()
+```
+
+```python
+# v3 — background
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# v4 — background (preferred, using context manager)
+with Scheduler() as scheduler:
+    scheduler.start_in_background()
+    # rest of the application runs here
+```
+
+**The asyncio scheduler** has been replaced by `AsyncScheduler`, which is built on [AnyIO](https://pypi.org/project/anyio/) and therefore supports both asyncio and [Trio](https://pypi.org/project/trio/). The async scheduler **requires** use as an async context manager.
+
+```python
+# v4 — async (foreground)
+import asyncio
+from apscheduler import AsyncScheduler
+
+async def main():
+    async with AsyncScheduler() as scheduler:
+        await scheduler.run_until_stopped()
+
+asyncio.run(main())
+```
+
+**The `configure()` method is gone.** All configuration is now passed as keyword arguments directly to the scheduler constructor. There is no separate configuration step.
+
+```python
+# v3
+scheduler = BackgroundScheduler()
+scheduler.configure(jobstores={"default": SQLAlchemyJobStore(url="sqlite:///jobs.db")})
+
+# v4
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler import Scheduler
+
+scheduler = Scheduler(data_store=SQLAlchemyDataStore("sqlite+aiosqlite:///jobs.db"))
+```
+
+**Multiple data stores per scheduler are no longer supported.** Run multiple schedulers against separate data stores if you need this capability.
+
+---
+
+### `add_job()` renamed to `add_schedule()`; new `add_job()` behavior
+
+<Warning>
+  The old `add_job()` no longer creates recurring schedules. Calling it with a trigger will not behave as expected.
+</Warning>
+
+In v4:
+
+- **`add_schedule(callable, trigger, ...)`** — creates a recurring schedule backed by a trigger (replaces v3's `add_job()`).
+- **`add_job(callable, ...)`** — submits a one-off job for immediate execution (replaces v3's `add_job()` with `DateTrigger(datetime.now())`).
+
+```python
+# v3 — recurring job
+scheduler.add_job(send_report, "cron", hour=8, id="daily-report")
+
+# v4 — recurring schedule
+from apscheduler.triggers.cron import CronTrigger
+scheduler.add_schedule(send_report, CronTrigger(hour=8), id="daily-report")
+
+# v3 — one-off job
+from apscheduler.triggers.date import DateTrigger
+scheduler.add_job(process_data, DateTrigger(datetime.now()), args=[payload])
+
+# v4 — one-off job
+scheduler.add_job(process_data, args=[payload])
+```
+
+---
+
+### Trigger changes
+
+**Datetimes without explicit time zones** are now assumed to be in the local timezone (as determined by the `TZ` environment variable or the system setting). This is handled by the `tzlocal` library. To change the assumed local timezone, set the `TZ` environment variable:
+
+```bash
+export TZ="Europe/Helsinki"
+```
+
+**Jitter** has moved from individual triggers to the schedule level. Remove any `jitter` arguments from your trigger constructors and pass `jitter` to `add_schedule()` instead.
+
+```python
+# v3
+scheduler.add_job(my_func, IntervalTrigger(hours=1, jitter=60))
+
+# v4
+from apscheduler.triggers.interval import IntervalTrigger
+scheduler.add_schedule(my_func, IntervalTrigger(hours=1), jitter=60)
+```
+
+**`CronTrigger` weekday numbering** has changed to match the standard convention:
+
+| Day | v3 number | v4 number |
+|---|---|---|
+| Sunday | 6 | 0 |
+| Monday | 0 | 1 |
+| Tuesday | 1 | 2 |
+| Wednesday | 2 | 3 |
+| Thursday | 3 | 4 |
+| Friday | 4 | 5 |
+| Saturday | 5 | 6 |
+
+<Warning>
+  If you use numeric weekday values in your `CronTrigger` configurations, you must update them. Using abbreviated names (`"sun"`, `"mon"`, `"fri"`) avoids ambiguity and is recommended.
+</Warning>
+
+```python
+# v3 — Monday (was 0)
+CronTrigger(day_of_week=0)
+
+# v4 — Monday (now 1), or use names to be safe
+CronTrigger(day_of_week="mon")
+```
+
+**`IntervalTrigger` now starts immediately** (at the moment it is first processed) rather than waiting for one full interval to elapse. If you had workarounds — such as setting an explicit `start_date` in the past — to make v3 fire immediately, remove them.
+
+```python
+# v3 — fired after one hour delay unless you set start_date
+scheduler.add_job(my_func, "interval", hours=1)
+
+# v4 — fires immediately on first processing, then every hour
+scheduler.add_schedule(my_func, IntervalTrigger(hours=1))
+```
+
+---
+
+## From v3.0 to v3.2
+
+Prior to v3.1, the scheduler inadvertently exposed the ability to fetch and manipulate jobs before it had been started. This was corrected: you must call `scheduler.start()` before accessing jobs in the job stores.
+
+To avoid processing stale jobs immediately on startup, v3.2 introduced paused mode:
+
+```python
+scheduler.start(paused=True)
+# inspect or clean up old jobs here
+scheduler.resume()
+```
+
+---
+
+## From v2.x to v3.0
+
+v3.0 was a full API overhaul and is not backwards compatible with v2.x.
+
+**Scheduler changes:**
+
+- "Standalone mode" (`standalone=True`) → use `BlockingScheduler`. Default (`standalone=False`) → use `BackgroundScheduler`.
+- Job defaults (`misfire_grace_time`, `coalesce`) must now be passed as a `job_defaults` dict to `configure()`.
+- The `threadpool` options are gone; use `ThreadPoolExecutor` configuration instead.
+- Trigger-specific scheduling methods (`add_cron_job()`, `add_interval_job()`, etc.) have been removed. Use `add_job()` with an explicit trigger.
+- `Scheduler.unschedule_job()` and `Scheduler.unschedule_func()` → `BaseScheduler.remove_job()`.
+- `shutdown_threadpool` and `close_jobstores` arguments removed from `shutdown()` — executors and stores are always shut down automatically.
+- The `max_runs` option was dropped. Use `end_date` on cron and interval triggers instead.
+
+**Job store changes:**
+
+Job store data from v2.x is not compatible with v3.x stores. If you need to migrate existing v2 data, contact the APScheduler maintainer.
+
+The Shelve job store was dropped. Use `SQLAlchemyJobStore` with an SQLite URL as a replacement.
+
+**Trigger changes:**
+
+All triggers now require an explicit pytz timezone (normally provided by the scheduler). `get_next_fire_time()` now takes two arguments: the previous fire time and the current datetime.

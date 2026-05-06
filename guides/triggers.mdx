@@ -1,0 +1,389 @@
+---
+title: "Scheduling Triggers in APScheduler"
+description: "Learn how to use APScheduler's built-in triggers—CronTrigger, IntervalTrigger, CalendarIntervalTrigger, and DateTrigger—to control when tasks run."
+---
+
+Triggers are the scheduling engine of APScheduler. Every schedule has exactly one trigger, and that trigger is responsible for calculating the sequence of datetimes at which the associated task will be run. APScheduler ships with four built-in trigger types covering the most common scheduling patterns, plus two combining triggers for complex cases where a single trigger is not enough.
+
+## CronTrigger
+
+`CronTrigger` fires whenever the current time matches all of the field expressions you provide, in the same way that a traditional UNIX cron daemon works. Any field you leave unspecified is treated as a wildcard (`*`).
+
+### Field reference
+
+| Field | Values |
+|---|---|
+| `year` | 4-digit year |
+| `month` | 1–12 |
+| `day` | 1–31 |
+| `week` | ISO week number 1–53 |
+| `day_of_week` | `0`–`6` (Mon–Sun), or names `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun` |
+| `hour` | 0–23 |
+| `minute` | 0–59 |
+| `second` | 0–59 |
+
+<Note>
+The first weekday is always **Monday** (`0` or `mon`). Both `0` and `7` are accepted as Sunday when using `day_of_week`.
+</Note>
+
+Each field accepts:
+
+- A single value: `5`
+- A range: `1-5`
+- A list: `1,3,5`
+- A step: `*/2` (every 2 units), `1-10/3`
+- A wildcard: `*`
+- Named shorthands for months and weekdays: `jan`, `feb`, `mon`, `tue`, etc.
+
+### Additional parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `start_time` | current time | Earliest datetime to trigger on |
+| `end_time` | `None` | Latest datetime to trigger on (inclusive); `None` means no limit |
+| `timezone` | local timezone | Timezone for all date/time calculations |
+
+### Examples
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from apscheduler import Scheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    def my_task():
+        print("running")
+
+    with Scheduler() as scheduler:
+        # Every weekday at 08:30
+        scheduler.add_schedule(my_task, CronTrigger(day_of_week="mon-fri", hour=8, minute=30))
+
+        # At 00:00 on the 1st day of every month
+        scheduler.add_schedule(my_task, CronTrigger(day=1, hour=0, minute=0))
+
+        # Every 15 minutes between 09:00 and 17:00
+        scheduler.add_schedule(my_task, CronTrigger(hour="9-17", minute="*/15"))
+
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    async def my_task():
+        print("running")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            # Every weekday at 08:30
+            await scheduler.add_schedule(my_task, CronTrigger(day_of_week="mon-fri", hour=8, minute=30))
+
+            # At 00:00 on the 1st day of every month
+            await scheduler.add_schedule(my_task, CronTrigger(day=1, hour=0, minute=0))
+
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+### Using `from_crontab()`
+
+If you already have a standard five-field crontab expression, use the `from_crontab()` classmethod to create a `CronTrigger` directly. The field order follows the conventional crontab format: `minute hour day-of-month month day-of-week`.
+
+```python
+from apscheduler.triggers.cron import CronTrigger
+
+# Equivalent to: minute=30, hour=8, day=*, month=*, day_of_week=mon-fri
+trigger = CronTrigger.from_crontab("30 8 * * mon-fri")
+
+# With an explicit timezone
+trigger = CronTrigger.from_crontab("0 0 1 * *", timezone="America/New_York")
+```
+
+---
+
+## IntervalTrigger
+
+`IntervalTrigger` fires repeatedly at a fixed time interval. The first fire time defaults to the moment the trigger is created (`start_time`), and the trigger continues indefinitely unless `end_time` is set.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `weeks` | `0` | Number of weeks between fires |
+| `days` | `0` | Number of days between fires |
+| `hours` | `0` | Number of hours between fires |
+| `minutes` | `0` | Number of minutes between fires |
+| `seconds` | `0` | Number of seconds between fires |
+| `microseconds` | `0` | Number of microseconds between fires |
+| `start_time` | current time | First trigger datetime |
+| `end_time` | `None` | Latest datetime to trigger on; `None` means no limit |
+
+The parameters are additive—you can combine them freely. The total interval must be positive.
+
+<Warning>
+All interval components sum together into a single `timedelta`. Passing `hours=1, minutes=30` means every 90 minutes, not 1 hour and then 30 minutes separately.
+</Warning>
+
+### Examples
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from datetime import datetime, timezone
+    from apscheduler import Scheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    def poll():
+        print("polling")
+
+    with Scheduler() as scheduler:
+        # Every 30 seconds
+        scheduler.add_schedule(poll, IntervalTrigger(seconds=30))
+
+        # Every 2 hours and 30 minutes, starting at a specific time
+        start = datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+        scheduler.add_schedule(poll, IntervalTrigger(hours=2, minutes=30, start_time=start))
+
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from datetime import datetime, timezone
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    async def poll():
+        print("polling")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            # Every 30 seconds
+            await scheduler.add_schedule(poll, IntervalTrigger(seconds=30))
+
+            # Every 2 hours and 30 minutes, starting at a specific time
+            start = datetime(2024, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+            await scheduler.add_schedule(
+                poll, IntervalTrigger(hours=2, minutes=30, start_time=start)
+            )
+
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## CalendarIntervalTrigger
+
+`CalendarIntervalTrigger` is designed for situations where you want a task to run at calendar-based intervals—every N months, for example—always at the same wall clock time. Unlike `IntervalTrigger`, it works in terms of calendar units (years, months) rather than fixed durations.
+
+### How it works
+
+When calculating the next run date, the trigger adds `years` and `months` to the previous run date while keeping the day-of-month constant. It then adds `weeks` and `days` on top. Finally, it combines the resulting date with the specified `hour`, `minute`, and `second`.
+
+<Warning>
+Avoid setting `start_date` near the end of the month (29th–31st) when `months` is specified, as months that do not have those days will be skipped. Similarly, avoid `start_date` on February 29th when `years` is set.
+</Warning>
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `years` | `0` | Number of years between fires |
+| `months` | `0` | Number of months between fires |
+| `weeks` | `0` | Number of weeks between fires |
+| `days` | `0` | Number of days between fires |
+| `hour` | `0` | Hour of day to run at |
+| `minute` | `0` | Minute of hour to run at |
+| `second` | `0` | Second of minute to run at |
+| `start_date` | today | First date to trigger on |
+| `end_date` | `None` | Latest date to trigger on; `None` means no limit |
+| `timezone` | `"local"` | Timezone for date/time calculations |
+
+At least one of `years`, `months`, `weeks`, or `days` must be non-zero.
+
+### Examples
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from datetime import date
+    from apscheduler import Scheduler
+    from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+
+    def monthly_report():
+        print("generating report")
+
+    with Scheduler() as scheduler:
+        # First day of every month at 10:00
+        scheduler.add_schedule(
+            monthly_report,
+            CalendarIntervalTrigger(months=1, hour=10, start_date=date(2024, 1, 1)),
+        )
+
+        # Every 2 months at 09:30
+        scheduler.add_schedule(
+            monthly_report,
+            CalendarIntervalTrigger(months=2, hour=9, minute=30),
+        )
+
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from datetime import date
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+
+    async def monthly_report():
+        print("generating report")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            # First day of every month at 10:00
+            await scheduler.add_schedule(
+                monthly_report,
+                CalendarIntervalTrigger(months=1, hour=10, start_date=date(2024, 1, 1)),
+            )
+
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## DateTrigger
+
+`DateTrigger` fires exactly once at the specified datetime. It is useful for one-off tasks that should run at a precise future time. After it fires, the trigger is exhausted and will not produce any further fire times.
+
+### Parameters
+
+| Parameter | Description |
+|---|---|
+| `run_time` | The `datetime` at which the task should run |
+
+### Example
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from datetime import datetime, timezone
+    from apscheduler import Scheduler
+    from apscheduler.triggers.date import DateTrigger
+
+    def send_reminder():
+        print("sending reminder")
+
+    run_at = datetime(2024, 12, 31, 23, 59, 0, tzinfo=timezone.utc)
+
+    with Scheduler() as scheduler:
+        scheduler.add_schedule(send_reminder, DateTrigger(run_time=run_at))
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from datetime import datetime, timezone
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.date import DateTrigger
+
+    async def send_reminder():
+        print("sending reminder")
+
+    async def main():
+        run_at = datetime(2024, 12, 31, 23, 59, 0, tzinfo=timezone.utc)
+
+        async with AsyncScheduler() as scheduler:
+            await scheduler.add_schedule(send_reminder, DateTrigger(run_time=run_at))
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Combining triggers
+
+Sometimes a single trigger cannot express the full scheduling logic you need. APScheduler provides two combining triggers—`OrTrigger` and `AndTrigger`—that wrap multiple triggers and merge their fire times.
+
+### OrTrigger
+
+`OrTrigger` fires on every fire time produced by any of its enclosed triggers, in chronological order. If two triggers produce the same fire time, it is only used once.
+
+This is useful when you want to run a task on different schedules that cannot be expressed as a single cron expression:
+
+```python
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+# Run at 10:00 Mon–Fri, and at 11:00 on weekends
+trigger = OrTrigger(
+    CronTrigger(day_of_week="mon-fri", hour=10),
+    CronTrigger(day_of_week="sat-sun", hour=11),
+)
+```
+
+On each call, `OrTrigger` returns the earliest fire time across all enclosed triggers. The trigger that produced that earliest time is then asked for its next fire time, and the process repeats.
+
+### AndTrigger
+
+`AndTrigger` fires only when all enclosed triggers agree on a fire time (within a configurable `threshold`, defaulting to 1 second). If the triggers disagree, the trigger that produced the earliest fire time advances to its next fire time and the comparison is retried—up to `max_iterations` times (default 10,000).
+
+This is useful for restricting an interval-based schedule to certain days:
+
+```python
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+from apscheduler.triggers.combining import AndTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+# Every 2 months at 10:00, but only on a weekday (not Saturday or Sunday)
+trigger = AndTrigger(
+    CalendarIntervalTrigger(months=2, hour=10),
+    CronTrigger(day_of_week="mon-fri", hour=10),
+)
+```
+
+If this trigger is created on 2022-06-07 at 09:00, its first few fire times would be:
+
+- 2022-06-07 10:00:00
+- 2022-10-07 10:00:00
+- 2022-12-07 10:00:00
+
+2022-08-07 is skipped because it falls on a Sunday.
+
+<Tip>
+You can customize `AndTrigger`'s `threshold` to allow fire times that are within a wider window to be considered a match. Pass it as a number of seconds or as a `timedelta`.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="CronTrigger API" icon="clock" href="/api/triggers/cron">
+    Full parameter and method reference for `CronTrigger`
+  </Card>
+  <Card title="IntervalTrigger API" icon="arrows-rotate" href="/api/triggers/interval">
+    Full parameter reference for `IntervalTrigger`
+  </Card>
+  <Card title="CalendarIntervalTrigger API" icon="calendar" href="/api/triggers/calendar-interval">
+    Full parameter reference for `CalendarIntervalTrigger`
+  </Card>
+  <Card title="DateTrigger API" icon="calendar-day" href="/api/triggers/date">
+    Full parameter reference for `DateTrigger`
+  </Card>
+</CardGroup>

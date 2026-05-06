@@ -1,0 +1,101 @@
+---
+title: "MongoDBDataStore — MongoDB Data Store Reference"
+description: "API reference for MongoDBDataStore, APScheduler's persistent data store backed by a MongoDB server using the async PyMongo driver."
+---
+
+`MongoDBDataStore` persists scheduler data — tasks, schedules, jobs, and job results — in a MongoDB database. On startup the store creates the necessary indexes if they do not already exist. Failed operations are retried automatically according to the configured `retry_settings` whenever a `pymongo.errors.ConnectionFailure` is raised.
+
+The store requires MongoDB **4.0 or later** and uses the async PyMongo client (`pymongo.asynchronous`). A string URI can also be passed directly, in which case the store constructs and manages the client lifecycle itself.
+
+## Installation
+
+```bash
+pip install apscheduler[mongodb]
+```
+
+## Constructor parameters
+
+<ParamField path="client_or_uri" type="AsyncMongoClient | str" required>
+  An asynchronous PyMongo `AsyncMongoClient` instance, or a MongoDB connection URI string
+  (e.g. `"mongodb://user:password@localhost:27017"`).
+
+  When a URI string is passed, the store creates the client internally and closes it on
+  shutdown. When an existing client instance is passed, the store uses it as-is and
+  **does not** close it — you are responsible for calling `client.close()` yourself.
+</ParamField>
+
+<ParamField path="database" type="str" default='"apscheduler"'>
+  Name of the MongoDB database in which to store scheduler data. The store creates four
+  collections inside this database: `tasks`, `schedules`, `jobs`, and `job_results`.
+</ParamField>
+
+<ParamField path="serializer" type="Serializer" default="PickleSerializer()">
+  The serializer used to encode and decode triggers, job arguments, and job results before
+  writing them to the database. Defaults to `PickleSerializer`. Switch to
+  `CBORSerializer` or `JSONSerializer` if you need a different wire format.
+</ParamField>
+
+<ParamField path="retry_settings" type="RetrySettings" default="RetrySettings()">
+  Tenacity-based retry configuration controlling how the store retries operations after
+  transient connectivity failures. Defaults to exponential back-off (0.5 s – 20 s) with
+  a 60-second total stop deadline.
+</ParamField>
+
+<ParamField path="start_from_scratch" type="bool" default="false">
+  When `True`, all existing data is erased during startup. Useful for test suites that
+  need a clean state on every run.
+</ParamField>
+
+<Note>
+  Datetimes are stored as integers with their UTC offsets rather than native BSON
+  datetimes, because BSON datetimes are only accurate to the millisecond while Python
+  datetimes are accurate to the microsecond.
+</Note>
+
+## Usage example
+
+```python
+import asyncio
+from pymongo import AsyncMongoClient
+from apscheduler.schedulers.async_ import AsyncScheduler
+from apscheduler.datastores.mongodb import MongoDBDataStore
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    client = AsyncMongoClient("mongodb://localhost:27017")
+
+    store = MongoDBDataStore(client, database="myapp_scheduler")
+
+    async with AsyncScheduler(data_store=store) as scheduler:
+        scheduler.add_schedule(my_task, "interval", seconds=60)
+        await scheduler.run_until_stopped()
+
+    client.close()
+
+
+asyncio.run(main())
+```
+
+### Using a URI string
+
+When you pass a URI string, the store owns the client lifecycle and closes it automatically on shutdown:
+
+```python
+store = MongoDBDataStore(
+    "mongodb://user:password@localhost:27017",
+    database="myapp_scheduler",
+)
+```
+
+### Authentication with query parameters
+
+```python
+store = MongoDBDataStore(
+    "mongodb://user:password@localhost:27017/?authSource=admin",
+    database="myapp_scheduler",
+)
+```

@@ -1,0 +1,264 @@
+---
+title: "APScheduler Concepts and Architecture"
+description: "Learn the core building blocks of APScheduler: callables, tasks, triggers, schedules, jobs, data stores, job executors, event brokers, and schedulers."
+---
+
+APScheduler is built from a small set of composable concepts. Understanding what each one does and how they relate to each other makes it straightforward to configure the library for everything from a simple single-process script to a multi-node distributed deployment. This page defines each concept and explains where it fits in the system.
+
+<AccordionGroup>
+
+<Accordion title="Callable">
+
+A *callable* is any Python object for which the built-in `callable()` function returns `True`. APScheduler can schedule any of the following as a task:
+
+- A free function (`def my_func(): ...`)
+- An instance method (`instance.my_method`)
+- A class method (`MyClass.my_classmethod`)
+- A static method (`MyClass.my_staticmethod`)
+- A lambda (`lambda: ...`)
+- An instance of a class that defines `__call__`
+
+When APScheduler needs to persist a callable (for example, when storing a job in a database), it serializes a reference to it in the form `package.module:qualname`. This means lambdas and nested functions cannot be persisted directly — you must wrap them in an explicitly configured task first.
+
+</Accordion>
+
+<Accordion title="Task">
+
+A *task* wraps a callable together with a set of configuration parameters that apply to every job created from it. Tasks have three roles:
+
+1. **Identify the callable** to run when a job executes.
+2. **Provide a unique key** (the task ID) used to enforce the maximum number of concurrently running jobs across all schedules that target the same task.
+3. **Supply default settings** such as `job_executor`, `max_running_jobs`, and `misfire_grace_time` that are inherited by schedules and jobs derived from the task.
+
+In most cases tasks are created implicitly when you call `scheduler.add_schedule()` with a callable. You only need to configure a task explicitly when you need non-default settings, multiple tasks for the same callable, or when the callable cannot be referenced by a module path.
+
+```python
+from apscheduler import Scheduler, task
+
+@task(max_running_jobs=3)
+def my_task():
+    ...
+
+with Scheduler() as scheduler:
+    # Explicitly configure the task before scheduling it
+    scheduler.configure_task("my_task_id", func=my_task)
+```
+
+</Accordion>
+
+<Accordion title="Trigger">
+
+A *trigger* contains the logic and state used to calculate the sequence of datetimes on which a scheduled task should run. APScheduler ships four built-in trigger types:
+
+| Trigger | Use when |
+|---|---|
+| `CronTrigger` | You want cron-style scheduling (specific times of day, days of week, etc.) |
+| `IntervalTrigger` | You want the task to fire on a fixed time interval |
+| `CalendarIntervalTrigger` | You want calendar-based intervals (every N months, always at the same time of day) |
+| `DateTrigger` | You want the task to run exactly once at a specific datetime |
+
+Triggers are stateful — each call to `next()` advances the trigger's internal state and returns the next fire time, or `None` when the trigger has been exhausted.
+
+You can also combine triggers using `AndTrigger` and `OrTrigger` from `apscheduler.triggers.combining` when built-in triggers alone cannot express your scheduling requirements.
+
+```python
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+# Run at 10:00 Mon–Fri and at 11:00 Sat–Sun
+trigger = OrTrigger(
+    CronTrigger(day_of_week="mon-fri", hour=10),
+    CronTrigger(day_of_week="sat-sun", hour=11),
+)
+```
+
+You can implement custom scheduling logic by writing a class that conforms to the `Trigger` abstract base class in `apscheduler.abc`.
+
+</Accordion>
+
+<Accordion title="Schedule">
+
+A *schedule* binds a task to a trigger plus a set of per-schedule configuration parameters. When the scheduler processes a due schedule it uses the trigger to compute the next run time(s), creates one or more jobs, updates the schedule's next fire time, and writes everything back to the data store.
+
+Key configuration options on a schedule:
+
+- **`id`** — a stable identifier; required when using a persistent data store so that the same schedule is not created again on every restart
+- **`coalesce`** — controls what happens when multiple run times have accumulated (queue all of them, or just the earliest or latest)
+- **`misfire_grace_time`** — how late a job is allowed to start before it is discarded as missed
+- **`max_running_jobs`** — the maximum number of concurrently running jobs for this schedule's task
+
+```python
+from apscheduler import ConflictPolicy, Scheduler
+from apscheduler.triggers.cron import CronTrigger
+
+with Scheduler() as scheduler:
+    scheduler.add_schedule(
+        my_task,
+        CronTrigger(hour=9),
+        id="daily-report",
+        conflict_policy=ConflictPolicy.replace,
+    )
+    scheduler.run_until_stopped()
+```
+
+</Accordion>
+
+<Accordion title="Job">
+
+A *job* is a request for a task to be executed. Jobs are created automatically by the scheduler when it processes a due schedule, or directly by the user to run a task immediately without a schedule.
+
+Each job captures:
+
+- The callable and the arguments to pass to it
+- The scheduled run time (if created from a schedule)
+- The start deadline (`scheduled_time + misfire_grace_time`) after which the job will be discarded if not yet started
+
+To run a task directly and wait for the result:
+
+```python
+result = scheduler.run_job(my_task, kwargs={"arg": "value"})
+```
+
+To fire a job without waiting:
+
+```python
+job_id = scheduler.add_job(my_task)
+```
+
+</Accordion>
+
+<Accordion title="Data store">
+
+The *data store* persists tasks, schedules, and jobs. It is also responsible for enforcing schedule uniqueness and discarding jobs that have exceeded their start deadline.
+
+APScheduler ships three data store implementations:
+
+| Data store | Backend | Extra required |
+|---|---|---|
+| `MemoryDataStore` | In-process memory (default) | none |
+| `SQLAlchemyDataStore` | PostgreSQL, MySQL, SQLite | `sqlalchemy` |
+| `MongoDBDataStore` | MongoDB | `mongodb` |
+
+The default `MemoryDataStore` does not survive process restarts. Use a persistent store in production to ensure that schedules and jobs are not lost if the process exits unexpectedly.
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/mydb")
+data_store = SQLAlchemyDataStore(engine)
+
+async with AsyncScheduler(data_store) as scheduler:
+    ...
+```
+
+</Accordion>
+
+<Accordion title="Job executor">
+
+A *job executor* is responsible for actually calling the callable associated with a job. The executor chosen determines how the callable is invoked and in which context it runs.
+
+APScheduler provides three built-in executors:
+
+| Executor key | Class | How it runs the job |
+|---|---|---|
+| `"async"` | `AsyncJobExecutor` | Calls the callable directly in the async event loop (use for async callables) |
+| `"threadpool"` | `ThreadPoolJobExecutor` | Runs the callable in a thread pool (default for `Scheduler`) |
+| `"processpool"` | `ProcessPoolJobExecutor` | Runs the callable in a process pool (use for CPU-bound work) |
+
+The default executor for `Scheduler` is `"threadpool"`. The default for `AsyncScheduler` is `"async"`. You can override the executor per task or per schedule.
+
+</Accordion>
+
+<Accordion title="Event broker">
+
+The *event broker* delivers events — such as schedule additions, job completions, and scheduler lifecycle changes — to all interested listeners. It is the coordination layer that allows multiple scheduler instances to cooperate.
+
+The default `LocalEventBroker` delivers events only within the same process. When running multiple schedulers against a shared data store, replace it with a distributed broker:
+
+| Event broker | Backend | Extra required |
+|---|---|---|
+| `LocalEventBroker` | In-process (default) | none |
+| `RedisEventBroker` | Redis | `redis` |
+| `MQTTEventBroker` | MQTT broker | `mqtt` |
+| `AsyncpgEventBroker` | PostgreSQL via asyncpg | `asyncpg` |
+
+You can subscribe to specific event types with `scheduler.subscribe()`:
+
+```python
+from apscheduler import JobAcquired, JobReleased
+
+def on_job_event(event):
+    print(f"Job event: {event.__class__.__name__}")
+
+scheduler.subscribe(on_job_event, {JobAcquired, JobReleased})
+```
+
+</Accordion>
+
+<Accordion title="Scheduler">
+
+The *scheduler* is the main user-facing interface of APScheduler. It owns a data store, an event broker, and one or more job executors. It exposes methods to manage tasks, schedules, and jobs, and internally drives two concurrent processes: processing due schedules and running available jobs.
+
+APScheduler provides two scheduler classes:
+
+| Class | Use with |
+|---|---|
+| `Scheduler` | Synchronous, thread-based applications |
+| `AsyncScheduler` | asyncio or Trio applications |
+
+`Scheduler` is a synchronous wrapper around `AsyncScheduler`. It runs the async scheduler in a dedicated background thread and exposes a blocking API.
+
+Both classes accept the same constructor parameters, including `data_store`, `event_broker`, `role`, `max_concurrent_jobs`, `job_executors`, and `task_defaults`.
+
+</Accordion>
+
+</AccordionGroup>
+
+## Scheduler roles
+
+The `SchedulerRole` enum controls what a running scheduler instance actually does:
+
+| Role | Description |
+|---|---|
+| `SchedulerRole.both` | Processes due schedules and runs jobs (the default) |
+| `SchedulerRole.scheduler` | Processes due schedules only — does not run jobs |
+| `SchedulerRole.worker` | Runs jobs only — does not process schedules |
+
+Setting an explicit role is useful in distributed deployments where you want some instances to act purely as workers and others to act purely as schedule processors, or where a web application should only enqueue work without running it.
+
+```python
+from apscheduler import Scheduler, SchedulerRole
+
+# This instance only processes schedules; a separate worker runs jobs
+with Scheduler(role=SchedulerRole.scheduler) as scheduler:
+    scheduler.run_until_stopped()
+```
+
+## How the pieces fit together
+
+When a scheduler is running, it performs two tasks concurrently:
+
+1. **Schedule processing** — it reads schedules that are due from the data store, uses each schedule's trigger to compute run time(s), creates jobs, and writes them back to the data store.
+2. **Job execution** — it reads available jobs from the data store, dispatches each one to the appropriate job executor, and records the result.
+
+The event broker notifies all connected scheduler instances whenever schedules or jobs change, so each instance can react immediately rather than polling on a fixed interval.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Triggers" icon="clock" href="/guides/triggers">
+    Full reference for all trigger types and combining strategies.
+  </Card>
+  <Card title="Data stores" icon="database" href="/guides/data-stores">
+    Configure persistent data stores for production deployments.
+  </Card>
+  <Card title="Event brokers" icon="broadcast-tower" href="/guides/event-brokers">
+    Set up distributed event brokers to coordinate multiple schedulers.
+  </Card>
+  <Card title="Tasks" icon="list-check" href="/guides/tasks">
+    Configure tasks explicitly, set concurrency limits, and use the task decorator.
+  </Card>
+</CardGroup>

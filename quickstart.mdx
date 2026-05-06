@@ -1,81 +1,215 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get Started with APScheduler"
+description: "Install APScheduler and run your first scheduled task using the sync or async scheduler with interval and cron triggers in under five minutes."
 ---
 
-## Get started in three steps
+This guide walks you through installing APScheduler and running a working scheduler with a scheduled task. By the end you will have a task firing on a fixed interval and understand how to switch to the async API and add a cron-based schedule.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Install APScheduler">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Install the package from PyPI using pip:
 
-### Step 2: Deploy your changes
+```bash
+pip install apscheduler
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+The base package includes the in-memory data store and local event broker, which are enough for single-process use. To connect to an external database or message broker, install the relevant extra at the same time:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash
+# SQLAlchemy data store (PostgreSQL, MySQL, SQLite)
+pip install "apscheduler[sqlalchemy]"
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+# MongoDB data store
+pip install "apscheduler[mongodb]"
 
-### Step 3: Go live
+# Redis event broker
+pip install "apscheduler[redis]"
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+# MQTT event broker
+pip install "apscheduler[mqtt]"
+
+# AsyncPG event broker (PostgreSQL)
+pip install "apscheduler[asyncpg]"
+
+# CBOR serializer (safer alternative to pickle for persistent stores)
+pip install "apscheduler[cbor]"
+
+# Multiple extras at once
+pip install "apscheduler[sqlalchemy,redis]"
+```
+
+APScheduler requires Python 3.10 or later.
+
+</Step>
+
+<Step title="Define a task function">
+
+Any Python callable can be used as a task. Define a plain function to start:
+
+```python
+from datetime import datetime
+
+def tick():
+    print("Hello, the time is", datetime.now())
+```
+
+Functions, methods, static methods, class methods, and any object with a `__call__` method all work as tasks.
+
+</Step>
+
+<Step title="Run a sync scheduler with an interval trigger">
+
+Use `Scheduler` as a context manager, add a schedule, then call `run_until_stopped` to block and process jobs:
+
+```python
+from datetime import datetime
+
+from apscheduler import Scheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+with Scheduler() as scheduler:
+    scheduler.add_schedule(tick, IntervalTrigger(seconds=1))
+    scheduler.run_until_stopped()
+```
+
+`IntervalTrigger(seconds=1)` fires the task once per second. Run the script and you will see a timestamped line printed every second. Press `Ctrl+C` to stop.
+
+<Note>
+`run_until_stopped` blocks the calling thread. Use `start_in_background` instead if you need the rest of your program to keep running after the scheduler starts.
+</Note>
+
+</Step>
+
+<Step title="Schedule with a cron trigger">
+
+Swap in `CronTrigger` to run the task on a cron-style schedule. This example runs the task at the top of every hour:
+
+```python
+from datetime import datetime
+
+from apscheduler import Scheduler
+from apscheduler.triggers.cron import CronTrigger
+
+
+def send_report():
+    print("Sending hourly report at", datetime.now())
+
+
+with Scheduler() as scheduler:
+    scheduler.add_schedule(send_report, CronTrigger(minute=0))
+    scheduler.run_until_stopped()
+```
+
+`CronTrigger` accepts `year`, `month`, `day`, `week`, `day_of_week`, `hour`, `minute`, and `second` parameters. Omitted fields match every value, following standard cron behaviour.
+
+</Step>
+
+<Step title="Run an async scheduler">
+
+If your application uses asyncio (or Trio), use `AsyncScheduler` instead. The API is identical except that methods are awaited and the scheduler is used as an async context manager:
+
+```python
+import asyncio
+from datetime import datetime
+
+from apscheduler import AsyncScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+async def main():
+    async with AsyncScheduler() as scheduler:
+        await scheduler.add_schedule(tick, IntervalTrigger(seconds=1))
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+<Tip>
+Prefer `AsyncScheduler` in any asyncio or Trio application. The synchronous `Scheduler` wrapper runs an asyncio event loop in a background thread, so using `AsyncScheduler` directly avoids that overhead.
+</Tip>
+
+</Step>
+
+<Step title="Run the scheduler in the background">
+
+If you want the scheduler to process jobs while your program does other work, call `start_in_background` instead of `run_until_stopped`:
+
+<Tabs>
+  <Tab title="Synchronous">
+    ```python
+    from apscheduler import Scheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+
+    def tick():
+        print("tick")
+
+
+    with Scheduler() as scheduler:
+        scheduler.add_schedule(tick, IntervalTrigger(seconds=5))
+        scheduler.start_in_background()
+        # Your other application code runs here
+        input("Press Enter to exit\n")
+    ```
+  </Tab>
+  <Tab title="Asynchronous">
+    ```python
+    import asyncio
+
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+
+    def tick():
+        print("tick")
+
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            await scheduler.add_schedule(tick, IntervalTrigger(seconds=5))
+            await scheduler.start_in_background()
+            # Your other async application code runs here
+            await asyncio.sleep(30)
+
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+If you start the scheduler in the background and let the script reach its end, the scheduler shuts down automatically. Keep your main program alive for as long as you need the scheduler to run.
+</Warning>
+
+</Step>
+
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Concepts" icon="book" href="/concepts">
+    Learn about tasks, schedules, jobs, triggers, data stores, and the event broker in depth.
+  </Card>
+  <Card title="Triggers" icon="clock" href="/guides/triggers">
+    Explore all four trigger types and how to combine them for complex schedules.
+  </Card>
+  <Card title="Data stores" icon="database" href="/guides/data-stores">
+    Persist your schedules and jobs across restarts with SQLAlchemy or MongoDB.
+  </Card>
+  <Card title="Multi-node deployment" icon="network-wired" href="/guides/multi-node">
+    Scale out with multiple schedulers sharing a common data store and event broker.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

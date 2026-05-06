@@ -1,0 +1,53 @@
+---
+title: "DateTrigger — One-Off Scheduled Execution Reference"
+description: "API reference for DateTrigger: fires a job exactly once at a specified datetime and never fires again. Use it for one-time deferred task execution."
+---
+
+`DateTrigger` fires a job exactly once at the specified datetime and then considers itself exhausted. It is the simplest trigger available and is useful whenever you need to schedule a task for a single point in the future — a delayed one-off execution rather than a recurring schedule.
+
+## Constructor parameters
+
+```python
+from apscheduler.triggers.date import DateTrigger
+
+trigger = DateTrigger(run_time=...)
+```
+
+<ParamField path="run_time" type="datetime" required>
+  The exact datetime at which the job should run. Naive datetimes are converted to timezone-aware datetimes using the converter logic. Accepts any value that can be passed to `as_aware_datetime`, including timezone-aware `datetime` objects and ISO-format strings.
+</ParamField>
+
+## Examples
+
+### Schedule a task for a specific datetime
+
+```python
+from datetime import datetime
+from apscheduler.triggers.date import DateTrigger
+import zoneinfo
+
+trigger = DateTrigger(
+    run_time=datetime(2024, 12, 31, 23, 59, 0, tzinfo=zoneinfo.ZoneInfo("UTC"))
+)
+```
+
+### Schedule a task for one hour from now
+
+```python
+from datetime import datetime, timedelta, timezone
+from apscheduler.triggers.date import DateTrigger
+
+trigger = DateTrigger(run_time=datetime.now(timezone.utc) + timedelta(hours=1))
+```
+
+### Using an ISO-format string
+
+```python
+from apscheduler.triggers.date import DateTrigger
+
+trigger = DateTrigger(run_time="2024-06-15T09:00:00+00:00")
+```
+
+<Note>
+  Once the trigger has fired once, subsequent calls to `next()` return `None`. The trigger does not reschedule itself.
+</Note>

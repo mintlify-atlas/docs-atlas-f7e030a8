@@ -1,0 +1,128 @@
+---
+title: "AndTrigger and OrTrigger — Combining Triggers Reference"
+description: "Full API reference for AndTrigger and OrTrigger, which combine multiple triggers to express scheduling logic too complex for any single built-in trigger."
+---
+
+APScheduler's combining triggers let you compose multiple triggers together to express scheduling requirements that no single trigger can represent on its own. `OrTrigger` unions fire times from all enclosed triggers, producing every time any one of them fires. `AndTrigger` intersects fire times, only producing a time when all enclosed triggers agree — within a configurable threshold.
+
+Both classes accept any mix of trigger types: `CronTrigger`, `IntervalTrigger`, `CalendarIntervalTrigger`, `DateTrigger`, or even other combining triggers.
+
+## `AndTrigger`
+
+`AndTrigger` fires only when all of its enclosed triggers produce fire times that fall within a given threshold of each other. This makes it useful for expressing conjunctive constraints, such as "every 2 months, but not on a weekend".
+
+When fire times do not coincide, `AndTrigger` advances the trigger(s) with the earliest fire time and re-evaluates. This iterates until either all triggers agree within the threshold, one trigger is exhausted (returning `None`), or `max_iterations` is reached (raising `MaxIterationsReached`).
+
+```python
+from apscheduler.triggers.combining import AndTrigger
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = AndTrigger(
+    [
+        CalendarIntervalTrigger(months=2, hour=10),
+        CronTrigger(day_of_week="mon-fri", hour=10),
+    ]
+)
+```
+
+### Constructor parameters
+
+```python
+AndTrigger(
+    triggers,
+    threshold=1,
+    max_iterations=10000,
+)
+```
+
+<ParamField path="triggers" type="list[Trigger]" required>
+  A list of trigger instances to combine. All triggers must produce a fire time within `threshold` seconds of each other for `AndTrigger` to fire.
+</ParamField>
+
+<ParamField path="threshold" type="float | timedelta" default="1">
+  Maximum allowed time difference (in seconds, or as a `timedelta`) between the fire times of all triggers for them to be considered coincident. Defaults to `1` second.
+</ParamField>
+
+<ParamField path="max_iterations" type="int | None" default="10000">
+  Maximum number of fire-time recalculation iterations before raising `MaxIterationsReached`. Set to `None` to allow unlimited iterations. The default of `10000` guards against infinite loops when triggers can never coincide.
+</ParamField>
+
+### Behavior details
+
+- `AndTrigger` finishes as soon as **any** enclosed trigger is exhausted (returns `None`).
+- On each iteration, triggers whose fire times fall within `threshold` of the earliest are all advanced together.
+- If all triggers agree within `threshold`, the **earliest** of their fire times is returned.
+
+### Example: every 2 months at 10:00, not on weekends
+
+```python
+from apscheduler.triggers.combining import AndTrigger
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = AndTrigger(
+    [
+        CalendarIntervalTrigger(months=2, hour=10),
+        CronTrigger(day_of_week="mon-fri", hour=10),
+    ]
+)
+```
+
+If the trigger is created on 2022-06-07, its first few fire times would be:
+
+- `2022-06-07 10:00:00`
+- `2022-10-07 10:00:00`
+- `2022-12-07 10:00:00`
+
+`2022-08-07` is skipped because it falls on a Sunday.
+
+---
+
+## `OrTrigger`
+
+`OrTrigger` fires on every fire time produced by any of its enclosed triggers, in chronological order. If two or more triggers produce the same fire time, it is only used once. `OrTrigger` finishes only when **all** enclosed triggers are exhausted.
+
+```python
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = OrTrigger(
+    [
+        CronTrigger(day_of_week="mon-fri", hour=10),
+        CronTrigger(day_of_week="sat-sun", hour=11),
+    ]
+)
+```
+
+### Constructor parameters
+
+```python
+OrTrigger(triggers)
+```
+
+<ParamField path="triggers" type="list[Trigger]" required>
+  A list of trigger instances to combine. Every fire time from every trigger is included in the output, merged and sorted chronologically. Duplicate times are deduplicated.
+</ParamField>
+
+### Behavior details
+
+- On each call to `next()`, `OrTrigger` returns the earliest pending fire time across all triggers.
+- The trigger that produced that earliest time is then advanced to its own next fire time.
+- `OrTrigger` only finishes when all enclosed triggers return `None`.
+
+### Example: weekdays at 10:00 AM, weekends at 11:00 AM
+
+```python
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = OrTrigger(
+    [
+        CronTrigger(day_of_week="mon-fri", hour=10),
+        CronTrigger(day_of_week="sat-sun", hour=11),
+    ]
+)
+```
+
+On the first call, both cron triggers compute their next fire times. The earlier of the two is returned. On subsequent calls, only the trigger that produced the returned time is advanced; the other retains its cached fire time until it becomes the earliest.

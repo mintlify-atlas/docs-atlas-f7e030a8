@@ -1,0 +1,576 @@
+---
+title: "Abstract Interfaces — APScheduler Extension Points"
+description: "Abstract base classes that define the contracts for custom triggers, serializers, event brokers, data stores, and job executors in APScheduler."
+---
+
+APScheduler is built around a set of abstract interfaces that allow you to swap out or extend almost every part of the scheduling pipeline. If you are building a custom trigger, a new data store backend, an alternative event broker, or a specialized job executor, you implement the relevant abstract base class defined in `apscheduler.abc`. The data structures, enumerations, and retry helpers documented here are the shared vocabulary those interfaces use.
+
+---
+
+## Abstract interfaces
+
+### Trigger
+
+`apscheduler.abc.Trigger` — abstract base class for all scheduling triggers.
+
+A trigger is an iterator of `datetime` values. Each call to `next()` returns the next fire time, or `None` when the trigger is exhausted. Because triggers are persisted to the data store between scheduler runs, every implementation must also support pickling-compatible state serialization via `__getstate__` and `__setstate__`.
+
+```python
+from apscheduler.abc import Trigger
+from datetime import datetime
+from typing import Any
+
+
+class MyTrigger(Trigger):
+    def next(self) -> datetime | None:
+        ...
+
+    def __getstate__(self) -> Any:
+        ...
+
+    def __setstate__(self, state: Any) -> None:
+        ...
+```
+
+**Abstract methods**
+
+<ParamField path="next" type="() -> datetime | None">
+  Return the next datetime to fire on. Returns `None` when no further fire times exist. Raises `MaxIterationsReached` if the trigger's internal logic exceeds a configured iteration limit.
+</ParamField>
+
+<ParamField path="__getstate__" type="() -> Any">
+  Return a serializable representation of the trigger's state. The return value must be compatible with whatever serializer the data store uses.
+</ParamField>
+
+<ParamField path="__setstate__" type="(state: Any) -> None">
+  Restore the trigger from a previously returned state object. Called on a freshly created (empty) instance.
+</ParamField>
+
+**Inherited behavior**
+
+`Trigger` extends `Iterator[datetime]`. The `__next__` implementation calls `next()` and raises `StopIteration` when it returns `None`, so you can iterate over a trigger with a standard `for` loop or `next()` built-in.
+
+---
+
+### Serializer
+
+`apscheduler.abc.Serializer` — interface for (de)serialization of arbitrary objects.
+
+Data stores use a serializer to persist trigger state, job arguments, and job results. Implementations must round-trip any JSON-compatible value as well as `datetime.date`, `datetime.timedelta`, and `datetime.tzinfo` objects.
+
+```python
+from apscheduler.abc import Serializer
+
+
+class MySerializer(Serializer):
+    def serialize(self, obj: object) -> bytes:
+        ...
+
+    def deserialize(self, serialized: bytes) -> object:
+        ...
+```
+
+**Abstract methods**
+
+<ParamField path="serialize" type="(obj: object) -> bytes">
+  Convert `obj` to a bytestring. Must handle at minimum: all JSON-compatible types, `datetime.date` (via `isoformat()`), `datetime.timedelta` (via `total_seconds()`), and `datetime.tzinfo` (by extracting the time zone name).
+</ParamField>
+
+<ParamField path="deserialize" type="(serialized: bytes) -> Any">
+  Restore an object from a bytestring previously produced by `serialize`. Returns a copy of the original object.
+</ParamField>
+
+---
+
+### Subscription
+
+`apscheduler.abc.Subscription` — represents an active event subscription.
+
+Returned by `EventBroker.subscribe()`. Use it to cancel the subscription when you no longer need events. It also works as a synchronous context manager: the subscription is cancelled automatically on exit.
+
+```python
+with broker.subscribe(my_callback, {MyEvent}) as sub:
+    # subscription active inside the block
+    ...
+# subscription cancelled here automatically
+```
+
+**Abstract methods**
+
+<ParamField path="unsubscribe" type="() -> None">
+  Cancel the subscription. Safe to call multiple times — subsequent calls after the first are no-ops.
+</ParamField>
+
+---
+
+### EventBroker
+
+`apscheduler.abc.EventBroker` — interface for publishing and subscribing to scheduler events.
+
+An event broker connects schedulers running in different processes or on different hosts. Local (in-process) subscribers are always notified. Remote subscribers (in other processes) are notified via the broker's transport only when you call `publish`, not `publish_local`.
+
+```python
+from apscheduler.abc import EventBroker, Subscription
+from apscheduler._events import Event
+from collections.abc import Callable
+from contextlib import AsyncExitStack
+from logging import Logger
+from typing import Any
+
+
+class MyEventBroker(EventBroker):
+    async def start(self, exit_stack: AsyncExitStack, logger: Logger) -> None:
+        ...
+
+    async def publish(self, event: Event) -> None:
+        ...
+
+    async def publish_local(self, event: Event) -> None:
+        ...
+
+    def subscribe(
+        self,
+        callback: Callable[..., Any],
+        event_types=None,
+        *,
+        is_async: bool = True,
+        one_shot: bool = False,
+    ) -> Subscription:
+        ...
+```
+
+**Abstract methods**
+
+<ParamField path="start" type="async (exit_stack: AsyncExitStack, logger: Logger) -> None">
+  Start the event broker. Called once during scheduler startup. Resources that need cleanup should be pushed onto `exit_stack` so they are torn down automatically when the scheduler shuts down.
+</ParamField>
+
+<ParamField path="publish" type="async (event: Event) -> None">
+  Publish an event to all subscribers, including remote ones connected through the broker's transport.
+</ParamField>
+
+<ParamField path="publish_local" type="async (event: Event) -> None">
+  Publish an event only to subscribers in the current process. Does not propagate to remote subscribers.
+</ParamField>
+
+<ParamField path="subscribe" type="(callback, event_types, *, is_async, one_shot) -> Subscription">
+  Register a callback to receive events.
+
+  - `callback` — callable invoked with the event object when a matching event is published
+  - `event_types` — iterable of concrete `Event` subclasses to subscribe to, or `None` to receive all events
+  - `is_async` — when `True`, a synchronous callback is called on the event loop thread; when `False`, it is called in a scheduler thread; ignored if `callback` is a coroutine function
+  - `one_shot` — when `True`, the subscription is automatically cancelled after the first matching event
+
+  Returns a `Subscription` that can be used to cancel the subscription.
+</ParamField>
+
+---
+
+### DataStore
+
+`apscheduler.abc.DataStore` — interface for persisting tasks, schedules, and jobs.
+
+The data store is the central persistence layer. It keeps track of all registered tasks, their schedules, and the pending/running jobs. When objects change, the store publishes the appropriate events through the associated `EventBroker`.
+
+Implementations must be safe for concurrent use by multiple scheduler instances; lease-based acquisition methods are the primary coordination mechanism.
+
+**Abstract methods — lifecycle**
+
+<ParamField path="start" type="async (exit_stack, event_broker, logger) -> None">
+  Start the data store. Called once during scheduler startup.
+
+  - `exit_stack` — push cleanup callbacks here; they run when the scheduler shuts down
+  - `event_broker` — the shared event broker; use it to publish events when data changes
+  - `logger` — logger the store should use for diagnostic output
+</ParamField>
+
+<ParamField path="cleanup" type="async () -> None">
+  Perform housekeeping in this order:
+  1. Purge expired job results (where `expires_at` ≤ now)
+  2. Release jobs with expired leases with the `cancelled` outcome
+  3. Purge finished schedules (`next_fire_time` is `None`) that have no associated running jobs
+</ParamField>
+
+**Abstract methods — tasks**
+
+<ParamField path="add_task" type="async (task: Task) -> None">
+  Add or replace a task. If a task with the same ID already exists it is replaced, but running-job accounting is preserved.
+</ParamField>
+
+<ParamField path="remove_task" type="async (task_id: str) -> None">
+  Remove the task with the given ID. Raises `TaskLookupError` if not found.
+</ParamField>
+
+<ParamField path="get_task" type="async (task_id: str) -> Task">
+  Return the task with the given ID. Raises `TaskLookupError` if not found.
+</ParamField>
+
+<ParamField path="get_tasks" type="async () -> list[Task]">
+  Return all tasks in the store, sorted by ID.
+</ParamField>
+
+**Abstract methods — schedules**
+
+<ParamField path="get_schedules" type="async (ids: set[str] | None) -> list[Schedule]">
+  Return schedules matching the given set of IDs, or all schedules when `ids` is `None`.
+</ParamField>
+
+<ParamField path="add_schedule" type="async (schedule: Schedule, conflict_policy: ConflictPolicy) -> None">
+  Add or update a schedule. `conflict_policy` determines the behavior when a schedule with the same ID already exists.
+</ParamField>
+
+<ParamField path="remove_schedules" type="async (ids: Iterable[str]) -> None">
+  Remove the schedules identified by `ids`.
+</ParamField>
+
+<ParamField path="acquire_schedules" type="async (scheduler_id, lease_duration, limit) -> list[Schedule]">
+  Claim up to `limit` due schedules for the given scheduler and return them. A schedule is eligible if it is unclaimed, its claim has expired, or it is already claimed by this scheduler.
+</ParamField>
+
+<ParamField path="release_schedules" type="async (scheduler_id, results: Sequence[ScheduleResult]) -> None">
+  Release claims on the given schedules and persist their updated state (`last_fire_time`, `next_fire_time`, `trigger`, cleared `acquired_by` and `acquired_until`).
+</ParamField>
+
+<ParamField path="get_next_schedule_run_time" type="async () -> datetime | None">
+  Return the earliest upcoming run time across all active schedules, or `None` if there are none.
+</ParamField>
+
+<ParamField path="extend_acquired_schedule_leases" type="async (scheduler_id, schedule_ids, duration) -> None">
+  Extend the leases of the specified schedules currently held by the given scheduler.
+</ParamField>
+
+**Abstract methods — jobs**
+
+<ParamField path="add_job" type="async (job: Job) -> None">
+  Enqueue a job for execution.
+</ParamField>
+
+<ParamField path="get_jobs" type="async (ids: Iterable[UUID] | None) -> list[Job]">
+  Return pending jobs matching the given IDs, or all pending jobs when `ids` is `None`. Jobs are returned in the order they will be given to schedulers.
+</ParamField>
+
+<ParamField path="acquire_jobs" type="async (scheduler_id, lease_duration, limit) -> list[Job]">
+  Claim up to `limit` unclaimed jobs for the given scheduler and return them.
+</ParamField>
+
+<ParamField path="release_job" type="async (scheduler_id, job: Job, result: JobResult) -> None">
+  Release the claim on a job and record its result.
+</ParamField>
+
+<ParamField path="get_job_result" type="async (job_id: UUID) -> JobResult | None">
+  Retrieve and remove the result of a job. Returns `None` if the result is not found.
+</ParamField>
+
+<ParamField path="extend_acquired_job_leases" type="async (scheduler_id, job_ids, duration) -> None">
+  Extend the leases of the specified jobs currently running under the given scheduler.
+</ParamField>
+
+<ParamField path="reap_abandoned_jobs" type="async (scheduler_id: str) -> None">
+  Find jobs still marked as acquired by `scheduler_id` and release them with the `abandoned` outcome. Called once during scheduler startup. Implementations must publish the appropriate `JobReleased` events.
+</ParamField>
+
+---
+
+### JobExecutor
+
+`apscheduler.abc.JobExecutor` — interface for running jobs.
+
+A job executor receives a callable and its associated `Job` metadata and is responsible for invoking the callable. The `start` method is optional (the base class provides a no-op implementation); only `run_job` is required.
+
+```python
+from apscheduler.abc import JobExecutor
+from apscheduler._structures import Job
+from collections.abc import Callable
+from contextlib import AsyncExitStack
+from typing import Any
+
+
+class MyJobExecutor(JobExecutor):
+    async def start(self, exit_stack: AsyncExitStack) -> None:
+        ...  # optional — set up thread pools, processes, etc.
+
+    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:
+        ...
+```
+
+**Methods**
+
+<ParamField path="start" type="async (exit_stack: AsyncExitStack) -> None">
+  Start the executor. The base class provides a no-op implementation, so you only need to override this if your executor requires setup (e.g. creating a thread pool). Push cleanup callbacks onto `exit_stack`.
+</ParamField>
+
+<ParamField path="run_job" type="async (func: Callable[..., Any], job: Job) -> Any" required>
+  Invoke `func` using the arguments stored in `job`. If `func` returns an awaitable, it should be awaited before returning the result. Returns whatever `func` returns.
+</ParamField>
+
+---
+
+## Data structures
+
+These `attrs`-based dataclasses are the core data model shared between the scheduler, data store, and event broker.
+
+### Task
+
+`apscheduler._structures.Task` — a callable and its scheduling configuration.
+
+```python
+from apscheduler._structures import Task
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | Unique identifier (immutable after creation) |
+| `func` | `str \| None` | Dotted-path reference to the callable (`module:attribute`), or `None` for non-serializable callables |
+| `job_executor` | `str` | Name of the job executor to use |
+| `max_running_jobs` | `int \| None` | Maximum concurrent instances; `None` means unlimited |
+| `misfire_grace_time` | `timedelta \| None` | How late a job may start before it is considered misfired |
+| `metadata` | `dict` | JSON-compatible key-value pairs for custom data |
+| `running_jobs` | `int` | Current number of running jobs for this task (managed by the data store) |
+
+---
+
+### TaskDefaults
+
+`apscheduler._structures.TaskDefaults` — default values applied to tasks when not explicitly configured.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `job_executor` | `str \| UnsetValue` | `unset` | Executor name; uses the scheduler default when unset |
+| `max_running_jobs` | `int \| None` | `1` | Maximum concurrent instances |
+| `misfire_grace_time` | `timedelta \| None` | `None` | Misfire grace period |
+| `metadata` | `dict` | `{}` | JSON-compatible custom data |
+
+---
+
+### Schedule
+
+`apscheduler._structures.Schedule` — a recurring schedule that produces jobs.
+
+Key fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | Unique identifier (immutable) |
+| `task_id` | `str` | ID of the task to run (immutable) |
+| `trigger` | `Trigger` | Trigger that determines fire times (immutable) |
+| `args` | `tuple` | Positional arguments passed to the task callable |
+| `kwargs` | `dict[str, Any]` | Keyword arguments passed to the task callable |
+| `paused` | `bool` | When `True`, the schedule is skipped during processing |
+| `coalesce` | `CoalescePolicy` | How to handle multiple accumulated fire times |
+| `misfire_grace_time` | `timedelta \| None` | Per-schedule misfire grace period |
+| `max_jitter` | `timedelta \| None` | Maximum random jitter added to each fire time |
+| `job_executor` | `str` | Executor name for jobs created by this schedule |
+| `job_result_expiration_time` | `timedelta` | Minimum time to keep job results in the store |
+| `metadata` | `dict` | JSON-compatible custom data |
+| `next_fire_time` | `datetime \| None` | Next scheduled run time |
+| `last_fire_time` | `datetime \| None` | Most recent scheduled run time |
+| `acquired_by` | `str \| None` | ID of the scheduler currently processing this schedule |
+| `acquired_until` | `datetime \| None` | Lease expiry; after this time other schedulers may acquire it |
+
+---
+
+### Job
+
+`apscheduler._structures.Job` — a queued request to execute a task.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Auto-generated unique identifier |
+| `task_id` | `str` | ID of the task to run |
+| `args` | `tuple` | Positional arguments for the task callable |
+| `kwargs` | `dict[str, Any]` | Keyword arguments for the task callable |
+| `schedule_id` | `str \| None` | ID of the originating schedule, if any |
+| `scheduled_fire_time` | `datetime \| None` | Intended fire time including jitter (schedule-derived jobs only) |
+| `executor` | `str` | Name of the executor that will run this job |
+| `jitter` | `timedelta` | Random offset added to the scheduled time |
+| `start_deadline` | `datetime \| None` | If the job starts after this time it is considered misfired |
+| `result_expiration_time` | `timedelta` | How long to keep the result available after completion |
+| `metadata` | `dict` | JSON-compatible custom data |
+| `created_at` | `datetime` | When the job was created (UTC) |
+| `acquired_by` | `str \| None` | ID of the scheduler currently executing this job |
+| `acquired_until` | `datetime \| None` | Lease expiry for the job |
+
+**Property**
+
+`original_scheduled_time` — the scheduled fire time with jitter subtracted. Returns `None` if the job was not derived from a schedule.
+
+---
+
+### JobResult
+
+`apscheduler._structures.JobResult` — the outcome of a completed job.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the job that produced this result |
+| `outcome` | `JobOutcome` | How the job ended |
+| `started_at` | `datetime \| None` | When the job was submitted to the executor |
+| `finished_at` | `datetime` | When the job finished or was discarded |
+| `expires_at` | `datetime` | When the result will be purged from the store |
+| `exception` | `BaseException \| None` | The raised exception when `outcome` is `error` |
+| `return_value` | `Any` | The return value when `outcome` is `success` |
+
+---
+
+### ScheduleResult
+
+`apscheduler._structures.ScheduleResult` — the outcome of processing a schedule during one scheduler iteration.
+
+| Field | Type | Description |
+|---|---|---|
+| `schedule_id` | `str` | ID of the processed schedule |
+| `task_id` | `str` | ID of the schedule's task |
+| `trigger` | `Trigger` | The schedule's trigger (updated state) |
+| `last_fire_time` | `datetime` | The fire time that was just processed |
+| `next_fire_time` | `datetime \| None` | The next scheduled fire time, or `None` if exhausted |
+
+---
+
+## Enumerations
+
+### CoalescePolicy
+
+`apscheduler._enums.CoalescePolicy` — controls how a schedule handles multiple accumulated fire times.
+
+| Value | Description |
+|---|---|
+| `earliest` | Submit one job using the earliest accumulated fire time |
+| `latest` | Submit one job using the latest accumulated fire time |
+| `all` | Submit one job for every accumulated fire time |
+
+```python
+from apscheduler import CoalescePolicy
+```
+
+---
+
+### ConflictPolicy
+
+`apscheduler._enums.ConflictPolicy` — controls what happens when adding a schedule whose ID already exists.
+
+| Value | Description |
+|---|---|
+| `replace` | Replace the existing schedule with the new one |
+| `do_nothing` | Keep the existing schedule and discard the new one |
+| `exception` | Raise an exception if a conflict is detected |
+
+```python
+from apscheduler import ConflictPolicy
+```
+
+---
+
+### JobOutcome
+
+`apscheduler._enums.JobOutcome` — indicates how a job's execution ended.
+
+| Value | Description |
+|---|---|
+| `success` | The job completed without error |
+| `error` | The job raised an exception |
+| `missed_start_deadline` | The job started too late (past `scheduled_fire_time` + `misfire_grace_time`) |
+| `deserialization_failed` | The job could not be deserialized for execution |
+| `cancelled` | Execution was cancelled (e.g. due to an expired lease) |
+| `abandoned` | The worker stopped unexpectedly before marking the job as done |
+
+```python
+from apscheduler import JobOutcome
+```
+
+---
+
+### RunState
+
+`apscheduler._enums.RunState` — the lifecycle state of a scheduler.
+
+| Value | Description |
+|---|---|
+| `starting` | The scheduler is initializing but not yet fully started |
+| `started` | The scheduler is running |
+| `stopping` | The scheduler is shutting down but not yet fully stopped |
+| `stopped` | The scheduler is not running |
+
+```python
+from apscheduler import RunState
+```
+
+---
+
+### SchedulerRole
+
+`apscheduler._enums.SchedulerRole` — determines which responsibilities the scheduler takes on.
+
+| Value | Description |
+|---|---|
+| `scheduler` | Processes due schedules and creates jobs, but does not run jobs |
+| `worker` | Runs due jobs, but does not process schedules |
+| `both` | Both processes schedules and runs jobs |
+
+```python
+from apscheduler import SchedulerRole
+```
+
+---
+
+## Retry helpers
+
+### RetrySettings
+
+`apscheduler._retry.RetrySettings` — Tenacity-based retry configuration used by data store implementations.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stop` | `tenacity.stop.stop_base` | `stop_after_delay(60)` | Condition that determines when to stop retrying |
+| `wait` | `tenacity.wait.wait_base` | `wait_exponential(min=0.5, max=20)` | Strategy for computing the delay between attempts |
+
+```python
+from apscheduler._retry import RetrySettings
+from tenacity import stop_after_delay, wait_exponential
+
+settings = RetrySettings(
+    stop=stop_after_delay(30),
+    wait=wait_exponential(min=1, max=10),
+)
+```
+
+---
+
+### RetryMixin
+
+`apscheduler._retry.RetryMixin` — mixin class that adds retry support to data store implementations.
+
+Include this mixin in your custom data store class to gain automatic retry behavior for transient connectivity failures.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `retry_settings` | `RetrySettings` | `RetrySettings()` | Retry configuration |
+
+**Property**
+
+`_temporary_failure_exceptions` — returns a tuple of exception classes that should trigger a retry. The base implementation returns an empty tuple; override this in your subclass to specify which exceptions represent recoverable failures (e.g. network timeouts, connection errors).
+
+**Method**
+
+`_retry()` — returns a configured `AsyncRetrying` context manager from Tenacity. Wrap async data store operations with it to enable automatic retries.
+
+```python
+from apscheduler._retry import RetryMixin, RetrySettings
+from apscheduler.abc import DataStore
+
+
+class MyDataStore(RetryMixin, DataStore):
+    retry_settings = RetrySettings()
+
+    @property
+    def _temporary_failure_exceptions(self):
+        return (MyTransientError,)
+
+    async def get_tasks(self):
+        async for attempt in self._retry():
+            with attempt:
+                return await self._backend.fetch_tasks()
+```
+
+<Note>
+  `RetryMixin` uses `attrs` for field definition and requires `slots=False`. Mix it in before the abstract base class in the MRO to ensure `retry_settings` is properly initialized.
+</Note>

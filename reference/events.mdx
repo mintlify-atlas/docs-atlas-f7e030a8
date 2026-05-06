@@ -1,0 +1,364 @@
+---
+title: "APScheduler Events Reference"
+description: "Complete reference for APScheduler's event system, including all event classes, their fields, and how to subscribe to events in sync and async code."
+---
+
+APScheduler publishes events whenever something of note happens inside the scheduler — a schedule is added, a job is acquired, or the scheduler itself starts or stops. You can subscribe to any combination of these events to react in real time, build audit logs, drive dashboards, or trigger downstream logic. All event objects are frozen `attrs` dataclasses and carry a UTC `timestamp` field.
+
+## Subscribing to events
+
+Call `scheduler.subscribe()` to register a listener callback. The method is available on both `Scheduler` and `AsyncScheduler`.
+
+```python
+subscribe(
+    callback,
+    event_types=None,
+    *,
+    is_async=True,
+    one_shot=False,
+) -> Subscription
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `callback` | `Callable[[Event], Any]` | — | The function called when a matching event is published. |
+| `event_types` | `Iterable[type[Event]] \| None` | `None` | Concrete event classes to listen for. Pass `None` to receive all events. |
+| `is_async` | `bool` | `True` | For synchronous callbacks only: when `True` the callback is invoked on the event-loop thread; when `False` it runs in a scheduler thread. Ignored for coroutine functions. |
+| `one_shot` | `bool` | `False` | When `True`, automatically unsubscribes after the first matching event is delivered. |
+
+<Tabs>
+  <Tab title="Synchronous">
+    ```python
+    from apscheduler import Scheduler, JobAcquired, JobReleased
+
+    def on_job_event(event):
+        print(f"[{event.__class__.__name__}] job_id={event.job_id}")
+
+    with Scheduler() as scheduler:
+        scheduler.subscribe(on_job_event, {JobAcquired, JobReleased})
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Asynchronous">
+    ```python
+    import asyncio
+    from apscheduler import AsyncScheduler, JobAcquired, JobReleased
+
+    async def on_job_event(event):
+        print(f"[{event.__class__.__name__}] job_id={event.job_id}")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            scheduler.subscribe(on_job_event, {JobAcquired, JobReleased})
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `AsyncScheduler` accepts both synchronous and asynchronous callbacks. The synchronous `Scheduler` only accepts synchronous callbacks.
+</Note>
+
+### Automatic unsubscribe with a context manager
+
+`subscribe()` returns a `Subscription` object. Use it as a context manager to automatically unsubscribe when the block exits.
+
+```python
+with scheduler.subscribe(on_job_event, {JobAcquired, JobReleased}):
+    # listener is active only inside this block
+    do_some_work()
+# listener has been automatically removed here
+```
+
+You can also call `subscription.unsubscribe()` explicitly at any time.
+
+### One-shot subscriptions
+
+```python
+# Fires once for the very next SchedulerStarted event, then unsubscribes.
+scheduler.subscribe(on_started, {SchedulerStarted}, one_shot=True)
+```
+
+### Distributed event brokers
+
+When using an external event broker (Redis, MQTT, asyncpg, psycopg) instead of the default in-process broker, all events except scheduler lifecycle events (`SchedulerStarted`, `SchedulerStopped`) are broadcast to **every** scheduler and worker connected to that broker. This enables coordinated multi-node setups where any node can react to events originating on a different node.
+
+---
+
+## Base event classes
+
+These classes are not published directly but serve as base types you can use for broad subscriptions.
+
+### `Event`
+
+Base class for all APScheduler events.
+
+| Field | Type | Description |
+|---|---|---|
+| `timestamp` | `datetime` | UTC datetime when the event occurred. Auto-populated if not supplied. |
+
+### `SchedulerEvent`
+
+Inherits `Event`. Base class for events that originate from a scheduler instance.
+
+### `DataStoreEvent`
+
+Inherits `Event`. Base class for events that originate from the data store.
+
+---
+
+## Scheduler events
+
+### `SchedulerStarted`
+
+Emitted when the scheduler has finished starting up and is ready to process schedules and jobs.
+
+Inherits `SchedulerEvent`. No additional fields.
+
+```python
+from apscheduler import SchedulerStarted
+
+def on_started(event: SchedulerStarted):
+    print("Scheduler is up")
+
+scheduler.subscribe(on_started, {SchedulerStarted})
+```
+
+### `SchedulerStopped`
+
+Emitted when the scheduler has shut down.
+
+Inherits `SchedulerEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `exception` | `BaseException \| None` | The exception that caused an unclean shutdown, or `None` for a clean stop. |
+
+```python
+from apscheduler import SchedulerStopped
+
+def on_stopped(event: SchedulerStopped):
+    if event.exception:
+        print(f"Scheduler crashed: {event.exception}")
+    else:
+        print("Scheduler stopped cleanly")
+
+scheduler.subscribe(on_stopped, {SchedulerStopped})
+```
+
+---
+
+## Job lifecycle events (scheduler-side)
+
+These events are emitted by the scheduler as it acquires and releases jobs for execution.
+
+### `JobAcquired`
+
+Emitted when a scheduler picks up a job from the data store and begins executing it.
+
+Inherits `SchedulerEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the acquired job. |
+| `scheduler_id` | `str` | ID of the scheduler that acquired the job. |
+| `task_id` | `str` | ID of the task the job belongs to. |
+| `schedule_id` | `str \| None` | ID of the schedule that created this job, if any. |
+| `scheduled_start` | `datetime \| None` | The time the job was scheduled to start (from a schedule), if applicable. |
+
+### `JobReleased`
+
+Emitted when a scheduler finishes processing a job, regardless of outcome.
+
+Inherits `SchedulerEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the released job. |
+| `scheduler_id` | `str` | ID of the scheduler that ran the job. |
+| `task_id` | `str` | ID of the task that was run. |
+| `schedule_id` | `str \| None` | ID of the originating schedule, if any. |
+| `scheduled_start` | `datetime \| None` | The scheduled fire time, if the job came from a schedule. |
+| `started_at` | `datetime \| None` | When the executor actually started the job. `None` if the job was skipped due to a missed start deadline. |
+| `outcome` | `JobOutcome` | How the job ended. One of `success`, `error`, `missed_start_deadline`, `deserialization_failed`, `cancelled`, or `abandoned`. |
+| `exception_type` | `str \| None` | Fully qualified class name of the exception, when `outcome` is `error`. |
+| `exception_message` | `str \| None` | `str(exception)` when `outcome` is `error`. |
+| `exception_traceback` | `list[str] \| None` | Traceback lines from the exception, when `outcome` is `error`. |
+
+```python
+from apscheduler import JobReleased
+from apscheduler._enums import JobOutcome
+
+def on_job_released(event: JobReleased):
+    if event.outcome == JobOutcome.error:
+        print(f"Job {event.job_id} failed: {event.exception_message}")
+    elif event.outcome == JobOutcome.success:
+        print(f"Job {event.job_id} completed successfully")
+
+scheduler.subscribe(on_job_released, {JobReleased})
+```
+
+---
+
+## Task events
+
+These events are emitted by the data store when tasks are created, updated, or removed.
+
+### `TaskAdded`
+
+Emitted when a new task is added to the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | `str` | ID of the task that was added. |
+
+### `TaskUpdated`
+
+Emitted when an existing task's configuration is updated in the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | `str` | ID of the task that was updated. |
+
+### `TaskRemoved`
+
+Emitted when a task is removed from the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | `str` | ID of the task that was removed. |
+
+---
+
+## Schedule events
+
+These events are emitted by the data store when schedules are created, updated, or removed.
+
+### `ScheduleAdded`
+
+Emitted when a new schedule is added to the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schedule_id` | `str` | ID of the new schedule. |
+| `task_id` | `str` | ID of the task the schedule targets. |
+| `next_fire_time` | `datetime \| None` | The first run time calculated for this schedule. `None` if the trigger produced no fire time. |
+
+### `ScheduleUpdated`
+
+Emitted when a schedule's next fire time or configuration changes.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schedule_id` | `str` | ID of the updated schedule. |
+| `task_id` | `str` | ID of the task the schedule targets. |
+| `next_fire_time` | `datetime \| None` | The next calculated fire time, or `None` if the schedule is exhausted. |
+
+### `ScheduleRemoved`
+
+Emitted when a schedule is removed from the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schedule_id` | `str` | ID of the removed schedule. |
+| `task_id` | `str` | ID of the task the schedule targeted. |
+| `finished` | `bool` | `True` if the schedule was automatically removed because its trigger had no more fire times left; `False` if it was removed explicitly. |
+
+### `ScheduleDeserializationFailed`
+
+Emitted when the data store cannot deserialize a stored schedule record.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schedule_id` | `str` | ID of the schedule that failed to deserialize. |
+| `exception` | `BaseException` | The exception raised during deserialization. |
+
+<Warning>
+  This event indicates that a schedule stored in your persistent data store cannot be loaded. This often means a code or serializer change has made old data incompatible. Investigate the `exception` field and consider clearing or migrating the affected record.
+</Warning>
+
+---
+
+## Job store events
+
+These events are emitted by the data store when jobs are created or removed.
+
+### `JobAdded`
+
+Emitted when a new job is added to the data store.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the new job. |
+| `task_id` | `str` | ID of the task the job will run. |
+| `schedule_id` | `str \| None` | ID of the schedule that created this job, or `None` for directly added jobs. |
+
+### `JobRemoved`
+
+Emitted when a job is removed from the data store after completion or cancellation.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the removed job. |
+| `task_id` | `str` | ID of the task the job was going to run. |
+
+### `JobDeserializationFailed`
+
+Emitted when the data store cannot deserialize a stored job record.
+
+Inherits `DataStoreEvent`.
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the job that failed to deserialize. |
+| `exception` | `BaseException` | The exception raised during deserialization. |
+
+<Warning>
+  Like `ScheduleDeserializationFailed`, this event signals that a persisted job record can no longer be loaded. The job will not be executed.
+</Warning>
+
+---
+
+## Event class hierarchy
+
+```
+Event
+├── SchedulerEvent
+│   ├── SchedulerStarted
+│   ├── SchedulerStopped
+│   ├── JobAcquired
+│   └── JobReleased
+└── DataStoreEvent
+    ├── TaskAdded
+    ├── TaskUpdated
+    ├── TaskRemoved
+    ├── ScheduleAdded
+    ├── ScheduleUpdated
+    ├── ScheduleRemoved
+    ├── ScheduleDeserializationFailed
+    ├── JobAdded
+    ├── JobRemoved
+    └── JobDeserializationFailed
+```
+
+Subscribing to a base class (e.g., `DataStoreEvent`) does **not** automatically deliver subclass events — you must list each concrete class you want. To receive everything, pass `None` as `event_types`.

@@ -1,0 +1,254 @@
+---
+title: "Managing Schedules in APScheduler"
+description: "Add, inspect, pause, unpause, and remove schedules in APScheduler, and control coalesce and conflict policies for reliable task delivery."
+---
+
+A schedule combines a task with a trigger and a set of configuration parameters that control how jobs are created from it. The scheduler continuously monitors all active schedules in the data store and creates jobs whenever a schedule's trigger produces a fire time that has passed.
+
+## Adding a schedule
+
+Use `add_schedule()` to register a new schedule. At minimum you must supply a callable (or task ID) and a trigger. The method returns the string ID of the newly created schedule.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `func_or_task_id` | — | A callable, task object, or string task ID to schedule |
+| `trigger` | — | The trigger that determines when the task runs |
+| `id` | auto-generated UUID | Explicit string identifier for the schedule |
+| `args` | `()` | Positional arguments passed to the callable on each run |
+| `kwargs` | `{}` | Keyword arguments passed to the callable on each run |
+| `paused` | `False` | Create the schedule in a paused state |
+| `coalesce` | `CoalescePolicy.latest` | How to handle accumulated missed fire times |
+| `misfire_grace_time` | inherited from task | Maximum lateness (seconds or `timedelta`) before a job is considered misfired |
+| `max_jitter` | `None` | Maximum random time (seconds or `timedelta`) to add to each fire time |
+| `job_result_expiration_time` | `0` | How long to retain job results created by this schedule |
+| `job_executor` | inherited from task | Name of the job executor to use for jobs from this schedule |
+| `conflict_policy` | `ConflictPolicy.do_nothing` | What to do if a schedule with the same ID already exists |
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from apscheduler import Scheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    def generate_report():
+        print("generating report")
+
+    with Scheduler() as scheduler:
+        schedule_id = scheduler.add_schedule(
+            generate_report,
+            CronTrigger(hour=9, minute=0),
+            id="daily-report",
+            kwargs={"format": "pdf"},
+        )
+        print(f"Schedule added with ID: {schedule_id}")
+        scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    async def generate_report():
+        print("generating report")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            schedule_id = await scheduler.add_schedule(
+                generate_report,
+                CronTrigger(hour=9, minute=0),
+                id="daily-report",
+                kwargs={"format": "pdf"},
+            )
+            print(f"Schedule added with ID: {schedule_id}")
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Coalesce policy
+
+When the scheduler has been unable to process a schedule for a while—due to downtime, overload, or heavy load—a schedule may accumulate multiple past fire times by the time it is next processed. The `coalesce` parameter controls how the scheduler handles this situation.
+
+| Value | Behavior |
+|---|---|
+| `CoalescePolicy.latest` | Queue **one** job using the **latest** accumulated fire time (default) |
+| `CoalescePolicy.earliest` | Queue **one** job using the **earliest** accumulated fire time |
+| `CoalescePolicy.all` | Queue **one job per** accumulated fire time |
+
+The difference between `latest` and `earliest` is significant for misfire detection. With `latest`, the job's start deadline is based on the most recent fire time, making it less likely to be discarded as a misfire.
+
+```python
+from apscheduler import CoalescePolicy
+from apscheduler.triggers.interval import IntervalTrigger
+
+# Queue a single catch-up job using the latest fire time
+scheduler.add_schedule(
+    my_task,
+    IntervalTrigger(minutes=5),
+    coalesce=CoalescePolicy.latest,
+)
+
+# Queue every missed run individually
+scheduler.add_schedule(
+    my_task,
+    IntervalTrigger(minutes=5),
+    coalesce=CoalescePolicy.all,
+)
+```
+
+---
+
+## Conflict policy
+
+When you always add the same schedule at application startup (a common pattern with persistent data stores), you need to tell the scheduler what to do if a schedule with that ID already exists.
+
+| Value | Behavior |
+|---|---|
+| `ConflictPolicy.do_nothing` | Keep the existing schedule; silently discard the new one (default) |
+| `ConflictPolicy.replace` | Replace the existing schedule with the new definition |
+| `ConflictPolicy.exception` | Raise an exception if a conflict is detected |
+
+<Note>
+When using a persistent data store, you should always set an explicit `id` and use `ConflictPolicy.replace` for schedules added at startup. This prevents duplicate schedules from accumulating each time the application restarts.
+</Note>
+
+```python
+from apscheduler import ConflictPolicy
+from apscheduler.triggers.cron import CronTrigger
+
+# Safe to call on every restart: replaces the existing schedule if present
+scheduler.add_schedule(
+    my_task,
+    CronTrigger(hour=0),
+    id="nightly-cleanup",
+    conflict_policy=ConflictPolicy.replace,
+)
+```
+
+---
+
+## Removing a schedule
+
+Call `remove_schedule()` with the schedule ID to delete it from the data store. Any jobs that have already been created from the schedule are not affected, but no new jobs will be created.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    scheduler.remove_schedule("daily-report")
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    await scheduler.remove_schedule("daily-report")
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Pausing and unpausing a schedule
+
+Pausing a schedule prevents the scheduler from creating new jobs from it. Jobs that have already been created and are currently running or queued are not affected.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    # Pause
+    scheduler.pause_schedule("daily-report")
+
+    # Unpause (resumes from where it left off)
+    scheduler.unpause_schedule("daily-report")
+
+    # Unpause and skip to the current time (avoids misfire on long pauses)
+    scheduler.unpause_schedule("daily-report", resume_from="now")
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    # Pause
+    await scheduler.pause_schedule("daily-report")
+
+    # Unpause (resumes from where it left off)
+    await scheduler.unpause_schedule("daily-report")
+
+    # Unpause and skip to the current time (avoids misfire on long pauses)
+    await scheduler.unpause_schedule("daily-report", resume_from="now")
+    ```
+  </Tab>
+</Tabs>
+
+### The `resume_from` parameter
+
+By default, when a schedule is unpaused it retains the `next_fire_time` it had when it was paused. If the scheduler was paused for a long time, that fire time will be in the past and the schedule may be considered misfired.
+
+Pass `resume_from` to control this:
+
+| Value | Effect |
+|---|---|
+| `None` (default) | Resume from the stored `next_fire_time`; may misfire |
+| `"now"` | Advance the trigger until the next fire time is at or after the current time |
+| A `datetime` object | Advance the trigger until the next fire time is at or after the given datetime |
+
+```python
+from datetime import datetime, timezone
+
+# Skip all fire times before a specific point
+resume_point = datetime(2024, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+scheduler.unpause_schedule("daily-report", resume_from=resume_point)
+```
+
+---
+
+## Listing schedules
+
+Use `get_schedules()` to retrieve all schedules currently in the data store, or `get_schedule()` to fetch a specific one by ID.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    # All schedules
+    schedules = scheduler.get_schedules()
+    for s in schedules:
+        print(s.id, s.next_fire_time)
+
+    # A specific schedule
+    schedule = scheduler.get_schedule("daily-report")
+    print(schedule.trigger)
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    # All schedules
+    schedules = await scheduler.get_schedules()
+    for s in schedules:
+        print(s.id, s.next_fire_time)
+
+    # A specific schedule
+    schedule = await scheduler.get_schedule("daily-report")
+    print(schedule.trigger)
+    ```
+  </Tab>
+</Tabs>
+
+Each `Schedule` object exposes the following attributes:
+
+| Attribute | Type | Description |
+|---|---|---|
+| `id` | `str` | Unique identifier |
+| `task_id` | `str` | ID of the associated task |
+| `trigger` | `Trigger` | The trigger instance |
+| `args` | `tuple` | Positional arguments for each job |
+| `kwargs` | `dict` | Keyword arguments for each job |
+| `paused` | `bool` | Whether the schedule is currently paused |
+| `coalesce` | `CoalescePolicy` | Coalesce policy in use |
+| `misfire_grace_time` | `timedelta \| None` | Deadline for late job starts |
+| `next_fire_time` | `datetime \| None` | When the schedule will next fire |
+| `last_fire_time` | `datetime \| None` | When the schedule last fired |

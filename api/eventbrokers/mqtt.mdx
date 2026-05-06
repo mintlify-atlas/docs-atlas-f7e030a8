@@ -1,0 +1,131 @@
+---
+title: "MQTTEventBroker — MQTT Event Broker Reference"
+description: "API reference for MQTTEventBroker, APScheduler's distributed event broker that uses an MQTT broker to broadcast scheduler events across processes."
+---
+
+`MQTTEventBroker` broadcasts scheduler events across processes and hosts using an MQTT broker (supporting MQTT v3.1 and v5). Each broker instance subscribes to a configurable topic at startup; when any scheduler publishes an event, all subscribers on that topic receive and deliver it locally.
+
+The broker requires the `paho-mqtt` library (v2.0 or later) and wraps a `paho.mqtt.client.Client` internally. TCP, WebSocket, and UNIX socket transports are all supported.
+
+## Installation
+
+```bash
+pip install apscheduler[mqtt]
+```
+
+## Constructor parameters
+
+<ParamField path="host" type="str" default='"localhost"'>
+  Hostname or IP address of the MQTT broker. For the `unix` transport, pass the path to
+  the UNIX socket file.
+</ParamField>
+
+<ParamField path="port" type="int | None" default="None">
+  Port to connect to. When `None` (the default), the port is chosen automatically based
+  on the `transport` and `ssl` settings:
+
+  - TCP without SSL → `1883`
+  - TCP with SSL → `8883`
+  - WebSocket without SSL → `80`
+  - WebSocket with SSL → `443`
+</ParamField>
+
+<ParamField path="transport" type="str" default='"tcp"'>
+  Transport protocol. One of `"tcp"`, `"websocket"`, or `"unix"`.
+</ParamField>
+
+<ParamField path="client_id" type="str | None" default="None">
+  MQTT client identifier. Required to resume a persistent MQTT session after a
+  disconnection. When `None`, the broker assigns a random ID.
+</ParamField>
+
+<ParamField path="ssl" type="bool | ssl.SSLContext" default="false">
+  SSL/TLS configuration. Pass `True` to use the default SSL context, an `ssl.SSLContext`
+  instance for custom certificates, or `False` (the default) to disable TLS.
+</ParamField>
+
+<ParamField path="topic" type="str" default='"apscheduler"'>
+  MQTT topic on which events are published and subscribed. All scheduler instances sharing
+  an event stream must use the same topic.
+</ParamField>
+
+<ParamField path="subscribe_qos" type="int" default="0">
+  MQTT Quality of Service level for incoming messages. Accepted values: `0` (at most
+  once), `1` (at least once), `2` (exactly once).
+</ParamField>
+
+<ParamField path="publish_qos" type="int" default="0">
+  MQTT Quality of Service level for outgoing messages. Accepted values: `0`, `1`, `2`.
+</ParamField>
+
+<ParamField path="serializer" type="Serializer" default="JSONSerializer()">
+  The serializer used to encode events before publishing and decode them after receiving.
+  Defaults to `JSONSerializer`. All scheduler instances sharing a topic must use the same
+  serializer.
+</ParamField>
+
+<ParamField path="retry_settings" type="RetrySettings" default="RetrySettings()">
+  Tenacity-based retry configuration for transient failures.
+</ParamField>
+
+## Usage example
+
+```python
+import asyncio
+from apscheduler.schedulers.async_ import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.mqtt import MQTTEventBroker
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = MQTTEventBroker(
+        host="mqtt.example.com",
+        port=1883,
+        topic="myapp/scheduler",
+    )
+
+    async with AsyncScheduler(
+        data_store=data_store,
+        event_broker=event_broker,
+    ) as scheduler:
+        scheduler.add_schedule(my_task, "interval", seconds=30)
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+### MQTT over TLS (MQTTS)
+
+```python
+event_broker = MQTTEventBroker(
+    host="mqtt.example.com",
+    ssl=True,
+    topic="myapp/scheduler",
+    subscribe_qos=1,
+    publish_qos=1,
+)
+```
+
+### MQTT over WebSocket
+
+```python
+event_broker = MQTTEventBroker(
+    host="mqtt.example.com",
+    transport="websocket",
+    topic="myapp/scheduler",
+)
+```
+
+<Note>
+  The `client_id` parameter is important for durable MQTT sessions. If the connection
+  drops and reconnects with the same `client_id`, the broker can replay any missed
+  messages (depending on the QoS level and broker configuration).
+</Note>

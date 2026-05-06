@@ -1,0 +1,248 @@
+---
+title: "Multi-Node Deployments with APScheduler"
+description: "Run multiple APScheduler instances against a shared data store for fault tolerance, horizontal scaling, and web app and worker separation."
+---
+
+APScheduler is designed to scale beyond a single process. Multiple scheduler instances can connect to the same persistent data store simultaneously, coordinating through a shared event broker so that schedules are processed exactly once and every instance reacts to changes made by the others. This architecture enables fault tolerance, horizontal scaling, and the separation of web applications from background workers.
+
+## When to run multiple schedulers
+
+<CardGroup cols={2}>
+  <Card title="Fault tolerance" icon="shield-halved">
+    If one scheduler crashes, the others continue processing schedules and jobs without interruption.
+  </Card>
+  <Card title="Multi-process web apps" icon="server">
+    WSGI and ASGI servers typically spawn several worker processes. A shared data store prevents duplicate job execution.
+  </Card>
+  <Card title="Dedicated workers" icon="gears">
+    Run a lightweight scheduler in your web app for schedule management, and one or more separate worker processes for heavy job execution.
+  </Card>
+  <Card title="Kubernetes scaling" icon="dharmachakra">
+    Scale workers as pods independently of the web tier, with each pod running its own scheduler instance.
+  </Card>
+</CardGroup>
+
+## Requirements for multi-scheduler setups
+
+Running multiple schedulers requires:
+
+1. **A persistent data store** — `SQLAlchemyDataStore` (PostgreSQL, MySQL) or `MongoDBDataStore`. The in-memory store cannot be shared across processes.
+2. **A distributed event broker** — `RedisEventBroker`, `AsyncpgEventBroker`, or `MQTTEventBroker`. The default `LocalEventBroker` is in-process only.
+
+See [Data Stores](/guides/data-stores) and [Event Brokers](/guides/event-brokers) for setup details.
+
+## Assigning a scheduler identity
+
+Every scheduler has an `identity` string that uniquely identifies it among all instances connected to the same data store. The identity is used to track which scheduler is currently processing a schedule or job, which helps other schedulers clean up abandoned work faster when a node disappears.
+
+If you do not set `identity` explicitly, APScheduler generates one from the hostname, process ID, and object ID — unique across restarts, but not stable.
+
+```python
+from apscheduler import AsyncScheduler
+
+async with AsyncScheduler(
+    data_store,
+    event_broker,
+    identity="worker-1",
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+<Tip>
+On Kubernetes, use the pod name as the scheduler identity. It is guaranteed to be unique within the cluster and remains stable across container restarts within the same pod lifecycle.
+
+```python
+import os
+from apscheduler import AsyncScheduler
+
+identity = os.environ.get("POD_NAME", "local-scheduler")
+
+async with AsyncScheduler(
+    data_store,
+    event_broker,
+    identity=identity,
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+Set `POD_NAME` via the Kubernetes `downwardAPI`:
+```yaml
+env:
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+```
+</Tip>
+
+## SchedulerRole: controlling what each instance does
+
+By default, each scheduler both processes due schedules and runs jobs (`SchedulerRole.both`). You can restrict a scheduler instance to one of these roles using the `role` parameter.
+
+| Role | Processes schedules | Runs jobs | Typical use |
+|---|---|---|---|
+| `SchedulerRole.both` | Yes | Yes | Default; standalone or simple multi-node setups |
+| `SchedulerRole.scheduler` | Yes | No | Schedule management only |
+| `SchedulerRole.worker` | No | Yes | Job execution only |
+
+```python
+from apscheduler import AsyncScheduler
+from apscheduler._enums import SchedulerRole
+
+# Dedicated worker — runs jobs but does not process schedules
+async with AsyncScheduler(
+    data_store,
+    event_broker,
+    role=SchedulerRole.worker,
+    identity="worker-pod-1",
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+## Using a scheduler as an interface only
+
+Some deployments need a scheduler instance that does not run at all — it only interacts with the data store to add schedules, configure tasks, or queue jobs. A web application is the classic example: the web process manages schedules but delegates actual job execution to dedicated worker processes.
+
+To do this, use the scheduler as a context manager but do not call `run_until_stopped()` or `start_in_background()`:
+
+```python
+# Scheduler used only to register a schedule, then exits
+async with AsyncScheduler(data_store, event_broker) as scheduler:
+    await scheduler.add_schedule(
+        my_task,
+        IntervalTrigger(seconds=1),
+        id="my-task",
+        conflict_policy=ConflictPolicy.replace,
+    )
+    # No run_until_stopped() — the scheduler exits after setup
+```
+
+See the `examples/separate_worker/` directory for a complete working example of this pattern.
+
+## Cleanup interval
+
+Each scheduler periodically calls the data store's `cleanup()` method to remove expired job results and finish jobs whose leases have expired. The interval is controlled by the `cleanup_interval` parameter (default: 15 minutes).
+
+```python
+from datetime import timedelta
+from apscheduler import AsyncScheduler
+
+async with AsyncScheduler(
+    data_store,
+    event_broker,
+    cleanup_interval=timedelta(minutes=5),
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+Set `cleanup_interval=None` to disable automatic cleanup entirely.
+
+## Practical patterns
+
+### Web app with a separate worker
+
+A common pattern separates the web application (which manages schedules) from one or more background workers (which execute jobs). Both connect to the same data store and event broker.
+
+<Steps>
+  <Step title="Set up shared infrastructure">
+    Create a PostgreSQL database and a Redis instance (or use `AsyncpgEventBroker` to avoid the extra Redis dependency).
+  </Step>
+  <Step title="Web process — manage schedules only">
+    ```python
+    # web_app.py (FastAPI example)
+    from contextlib import asynccontextmanager
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from fastapi import FastAPI
+    from apscheduler import AsyncScheduler, ConflictPolicy
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    data_store = SQLAlchemyDataStore(engine)
+    event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with AsyncScheduler(data_store, event_broker) as scheduler:
+            await scheduler.add_schedule(
+                my_task,
+                IntervalTrigger(minutes=5),
+                id="my-task",
+                conflict_policy=ConflictPolicy.replace,
+            )
+            # The scheduler registers the schedule but does not run jobs
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+    ```
+  </Step>
+  <Step title="Worker process — run jobs only">
+    ```python
+    # worker.py
+    import asyncio
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from apscheduler import AsyncScheduler
+    from apscheduler._enums import SchedulerRole
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    data_store = SQLAlchemyDataStore(engine)
+    event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+
+    async def main():
+        async with AsyncScheduler(
+            data_store,
+            event_broker,
+            role=SchedulerRole.worker,
+            identity="worker-1",
+        ) as scheduler:
+            await scheduler.run_until_stopped()
+
+    asyncio.run(main())
+    ```
+  </Step>
+</Steps>
+
+The `examples/separate_worker/` directory in the APScheduler repository contains async and sync variants of this pattern (`async_scheduler.py`, `async_worker.py`, `sync_scheduler.py`, `sync_worker.py`). The `examples/web/` directory contains complete web framework examples including FastAPI, Starlette, Flask, and bare ASGI/WSGI apps.
+
+### Multiple full schedulers (fault tolerance)
+
+If you want every instance to both process schedules and run jobs, simply run the same scheduler code on multiple machines or pods with different identities:
+
+```python
+import asyncio
+import os
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.redis import RedisEventBroker
+
+data_store = SQLAlchemyDataStore(
+    "postgresql+asyncpg://user:password@db-host/mydb"
+)
+event_broker = RedisEventBroker("redis://redis-host")
+
+async def main():
+    async with AsyncScheduler(
+        data_store,
+        event_broker,
+        identity=os.environ["POD_NAME"],
+    ) as scheduler:
+        await scheduler.run_until_stopped()
+
+asyncio.run(main())
+```
+
+APScheduler uses row-level locking in the data store to guarantee that each schedule or job is acquired by exactly one scheduler at a time, even when many instances are running concurrently.
+
+## Best practices
+
+- **Always assign explicit identities in production.** Auto-generated identities change across restarts, which slows down orphaned job cleanup.
+- **Use a stable, unique identity per instance.** On Kubernetes, the pod name is a natural choice. On VMs, the hostname works if you run at most one scheduler per host.
+- **Pair each persistent data store with a distributed event broker.** Running `SQLAlchemyDataStore` without a distributed broker means schedulers in different processes will not wake each other up promptly when new jobs are added.
+- **Do not use SQLite with multiple schedulers.** There is an [unresolved concurrency issue](https://github.com/agronholm/apscheduler/issues/959) with SQLite in multi-scheduler setups.

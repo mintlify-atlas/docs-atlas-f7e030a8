@@ -1,0 +1,195 @@
+---
+title: "APScheduler Frequently Asked Questions"
+description: "Answers to the most common questions about APScheduler, covering setup, debugging, deployment, scheduling behavior, and integration with web frameworks."
+---
+
+This page collects answers to questions that come up frequently when working with APScheduler. If your question is not answered here, check the [scheduling guide](/guides/schedules) or search the [GitHub discussions](https://github.com/agronholm/apscheduler/discussions/categories/q-a).
+
+<AccordionGroup>
+  <Accordion title="Is there a graphical user interface?">
+    APScheduler itself does not include a graphical interface. There are third-party projects that provide one:
+
+    - [django-apscheduler](https://pypi.org/project/django-apscheduler/)
+    - [apschedulerweb](https://github.com/marwinxxii/apschedulerweb)
+    - [Nextdoor scheduler](https://github.com/Nextdoor/ndscheduler)
+
+    <Warning>
+      As of this writing, none of these third-party projects have been updated to support APScheduler 4. They may work only with v3.x.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="How do I debug APScheduler?">
+    Set the `apscheduler` logger to `DEBUG` level. This emits detailed messages about schedule processing, job acquisition, and internal state.
+
+    ```python
+    import logging
+
+    logging.basicConfig()
+    logging.getLogger("apscheduler").setLevel(logging.DEBUG)
+    ```
+
+    Run this before creating your scheduler so that all startup messages are captured. The output will show you exactly what the scheduler is doing at each step, which makes it much easier to spot misconfiguration or timing issues.
+  </Accordion>
+
+  <Accordion title="What's the difference between Scheduler and AsyncScheduler?">
+    Both schedulers run the same underlying asynchronous engine, but they differ in how you interact with them:
+
+    | | `Scheduler` | `AsyncScheduler` |
+    |---|---|---|
+    | API | Synchronous | Asynchronous (`async`/`await`) |
+    | Context manager | `with` | `async with` (required in background mode) |
+    | Run in foreground | `scheduler.run_until_stopped()` | `await scheduler.run_until_stopped()` |
+    | Run in background | `scheduler.start_in_background()` | `await scheduler.start_in_background()` |
+    | Callback support | Sync callbacks only | Sync and async callbacks |
+    | AnyIO backends | asyncio (internally) | asyncio + Trio |
+
+    If your application already uses asyncio or Trio, prefer `AsyncScheduler`. The synchronous `Scheduler` spins up its own event loop in a dedicated thread, which adds overhead and can complicate integration with async frameworks.
+  </Accordion>
+
+  <Accordion title="How do I use APScheduler with a WSGI framework (Flask, Django, etc.)?">
+    Use the synchronous `Scheduler` and start it in the background. For WSGI applications you can start it without a context manager — APScheduler registers an `atexit` hook to shut the scheduler down cleanly when the process exits.
+
+    ```python
+    from apscheduler import Scheduler
+
+    scheduler = Scheduler()
+
+    def send_report():
+        print("Sending report...")
+
+    scheduler.add_schedule(send_report, "cron", hour=8, id="daily-report")
+    scheduler.start_in_background()
+    ```
+
+    <Warning>
+      If you start your WSGI app with multiple worker processes (e.g., `gunicorn -w 4`), each process will create its own scheduler instance. Use a persistent data store and a shared event broker so that all scheduler instances coordinate, or start the scheduler in a dedicated process and use the WSGI app only to enqueue jobs.
+    </Warning>
+
+    The preferred pattern for production WSGI deployments is to run the scheduler as a **separate worker process** against a shared data store, while the web processes only call `scheduler.add_job()` or `scheduler.add_schedule()`.
+  </Accordion>
+
+  <Accordion title="How do I use APScheduler with an ASGI framework (FastAPI, Starlette, etc.)?">
+    Use `AsyncScheduler` and integrate it with the application's lifespan. With FastAPI and Starlette, the lifespan context manager is the right place to start and stop the scheduler.
+
+    ```python
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    scheduler = AsyncScheduler()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with scheduler:
+            await scheduler.start_in_background()
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.post("/trigger")
+    async def trigger_job():
+        await scheduler.add_job(my_task)
+        return {"status": "queued"}
+    ```
+
+    The same multi-process caution from the WSGI section applies: if you run multiple ASGI worker processes, configure a shared persistent data store and event broker.
+  </Accordion>
+
+  <Accordion title="How do I prevent the same schedule from being added multiple times?">
+    Pass an explicit `id` and a `conflict_policy` when calling `add_schedule()`. At application startup, you almost always want `ConflictPolicy.replace` so that your schedule is refreshed each time but duplicates are never created.
+
+    ```python
+    from apscheduler import ConflictPolicy
+    from apscheduler.triggers.cron import CronTrigger
+
+    scheduler.add_schedule(
+        send_report,
+        CronTrigger(hour=8),
+        id="daily-report",
+        conflict_policy=ConflictPolicy.replace,
+    )
+    ```
+
+    Without an explicit `id`, APScheduler generates a unique UUID for each call, meaning a new schedule is added every time the application starts.
+  </Accordion>
+
+  <Accordion title="What happens to jobs and schedules when the scheduler restarts?">
+    It depends on the data store:
+
+    - **`MemoryDataStore` (default):** All schedules and jobs are lost when the process stops. They must be re-added each time the application starts.
+    - **Persistent data stores (SQLAlchemy, MongoDB):** Schedules and queued jobs survive across restarts. When the scheduler starts again, it resumes processing from where it left off.
+
+    When using a persistent store, set an explicit `id` and `conflict_policy=ConflictPolicy.replace` for schedules added at startup to avoid accumulating duplicates across restarts.
+  </Accordion>
+
+  <Accordion title="How do I limit the number of concurrent job instances?">
+    Set `max_running_jobs` on the task or schedule. By default, only one job per task is allowed to run at a time.
+
+    ```python
+    # Allow up to 3 concurrent jobs for this schedule
+    scheduler.add_schedule(
+        my_task,
+        IntervalTrigger(seconds=10),
+        max_running_jobs=3,
+    )
+    ```
+
+    You can also set it globally through task defaults:
+
+    ```python
+    from apscheduler import Scheduler, TaskDefaults
+
+    scheduler = Scheduler(task_defaults=TaskDefaults(max_running_jobs=5))
+    ```
+
+    When a new job would exceed the limit, it is terminated immediately with the outcome `JobOutcome.missed_start_deadline`.
+  </Accordion>
+
+  <Accordion title="What is misfire_grace_time?">
+    `misfire_grace_time` is the number of seconds (as a `float` or `timedelta`) that a scheduled job is allowed to be late before it is considered to have misfired and is discarded without running.
+
+    When a scheduler acquires jobs from the data store, it discards any whose `scheduled_start + misfire_grace_time` has already elapsed. Such jobs are released with the outcome `JobOutcome.missed_start_deadline`.
+
+    ```python
+    from datetime import timedelta
+    from apscheduler.triggers.cron import CronTrigger
+
+    # Allow up to 60 seconds of lateness before skipping
+    scheduler.add_schedule(
+        send_alert,
+        CronTrigger(minute="*/5"),
+        misfire_grace_time=timedelta(seconds=60),
+    )
+    ```
+
+    Set `misfire_grace_time=None` to disable the check entirely — the job will always run, no matter how late it is.
+
+    This setting is relevant when schedulers are restarted after downtime. During the downtime, scheduled fire times accumulate. On restart, all jobs whose deadlines have passed are silently dropped unless `misfire_grace_time` is large enough to keep them alive.
+  </Accordion>
+
+  <Accordion title="How do I run a task without a schedule?">
+    Use `scheduler.add_job()` for a fire-and-forget one-off run, or `scheduler.run_job()` if you need to wait for the result.
+
+    ```python
+    # Fire and forget
+    job_id = scheduler.add_job(process_data, args=[payload])
+
+    # Fire and wait for result (synchronous scheduler)
+    result = scheduler.run_job(process_data, args=[payload])
+    print(result.return_value)
+
+    # Fire, then retrieve result later
+    from datetime import timedelta
+    job_id = scheduler.add_job(
+        process_data,
+        args=[payload],
+        result_expiration_time=timedelta(minutes=5),
+    )
+    # ... do other work ...
+    result = scheduler.get_job_result(job_id)
+    ```
+
+    `add_job()` submits the job directly to the data store for the next available worker to pick up. No trigger or schedule is involved.
+  </Accordion>
+</AccordionGroup>

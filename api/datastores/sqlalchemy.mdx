@@ -1,0 +1,153 @@
+---
+title: "SQLAlchemyDataStore — SQL Database Store Reference"
+description: "API reference for SQLAlchemyDataStore, APScheduler's persistent data store backed by any SQLAlchemy-supported relational database."
+---
+
+`SQLAlchemyDataStore` persists scheduler data — tasks, schedules, jobs, and job results — in a relational database via SQLAlchemy. On startup the store creates the required tables if they do not already exist. Failed operations are retried automatically according to the configured `retry_settings` whenever an `OSError` or `sqlalchemy.exc.InterfaceError` is raised.
+
+## Installation
+
+```bash
+pip install apscheduler[sqlalchemy]
+```
+
+For specific database drivers, install the matching asyncio-compatible driver alongside the above:
+
+```bash
+# PostgreSQL — asyncpg driver
+pip install asyncpg
+
+# PostgreSQL — psycopg driver
+pip install psycopg
+
+# MySQL
+pip install asyncmy
+
+# SQLite
+pip install aiosqlite
+```
+
+## Constructor parameters
+
+<ParamField path="engine_or_url" type="str | sqlalchemy.engine.URL | Engine | AsyncEngine" required>
+  A SQLAlchemy connection URL string, a `URL` object, a synchronous `Engine`, or an
+  asynchronous `AsyncEngine`.
+
+  When a string or `URL` is passed, the store creates and manages the engine internally,
+  closing it on shutdown. When an existing engine instance is passed, the store uses it
+  as-is and **does not** close it on shutdown — you are responsible for disposing the
+  engine yourself.
+</ParamField>
+
+<ParamField path="schema" type="str | None" default="None">
+  Database schema name to use. When set, all tables are created inside that schema. Pass
+  `None` (the default) to use the database's default schema.
+</ParamField>
+
+<ParamField path="serializer" type="Serializer" default="PickleSerializer()">
+  The serializer used to encode and decode triggers, job arguments, and job results before
+  writing them to the database. Defaults to `PickleSerializer`. Switch to
+  `CBORSerializer` or `JSONSerializer` if you need a different wire format.
+</ParamField>
+
+<ParamField path="retry_settings" type="RetrySettings" default="RetrySettings()">
+  Tenacity-based retry configuration controlling how the store retries operations after
+  transient connectivity failures. Defaults to exponential back-off (0.5 s – 20 s) with
+  a 60-second total stop deadline.
+</ParamField>
+
+<ParamField path="start_from_scratch" type="bool" default="false">
+  When `True`, all existing data is erased during startup. Useful for test suites that
+  need a clean state on every run.
+</ParamField>
+
+## Supported databases
+
+The store has been tested with:
+
+- **PostgreSQL** (asyncpg and psycopg drivers) — full feature support including native timestamp-with-timezone and interval types, and `UPDATE ... RETURNING`.
+- **MySQL** (asyncmy driver) — supported, with emulated timestamp and interval types.
+- **SQLite** (aiosqlite driver) — works for single-scheduler setups only.
+
+<Warning>
+  Do not use SQLite when sharing the data store with multiple concurrent schedulers.
+  There is an unresolved concurrency issue
+  ([#959](https://github.com/agronholm/apscheduler/issues/959)) that can corrupt state.
+</Warning>
+
+<Note>
+  The store does not manage the lifecycle of an engine that you pass in. Call
+  `engine.dispose()` yourself when you are done with it.
+</Note>
+
+## Usage examples
+
+### PostgreSQL with asyncpg
+
+```python
+import asyncio
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+
+    async with AsyncScheduler(data_store=store) as scheduler:
+        await scheduler.add_schedule(my_task, IntervalTrigger(seconds=30))
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+### PostgreSQL with psycopg
+
+```python
+store = SQLAlchemyDataStore(
+    "postgresql+psycopg://user:password@localhost/mydb"
+)
+```
+
+### MySQL with asyncmy
+
+```python
+store = SQLAlchemyDataStore(
+    "mysql+asyncmy://user:password@localhost/mydb"
+)
+```
+
+### SQLite with aiosqlite
+
+```python
+store = SQLAlchemyDataStore("sqlite+aiosqlite:///scheduler.db")
+```
+
+### Passing an existing engine
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+
+engine = create_async_engine("postgresql+asyncpg://user:password@localhost/mydb")
+
+store = SQLAlchemyDataStore(engine)
+
+# You must dispose of the engine yourself when finished:
+# await engine.dispose()
+```
+
+### Using a custom schema
+
+```python
+store = SQLAlchemyDataStore(
+    "postgresql+asyncpg://user:password@localhost/mydb",
+    schema="scheduler",
+)
+```

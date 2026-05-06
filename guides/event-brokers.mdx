@@ -1,0 +1,230 @@
+---
+title: "Event Brokers for Distributed Schedulers"
+description: "Configure LocalEventBroker, RedisEventBroker, MQTTEventBroker, or AsyncpgEventBroker to coordinate schedulers across processes and nodes."
+---
+
+An event broker is the communication layer that lets schedulers notify each other about new or updated schedules and jobs. The default broker works only within a single process. When you run multiple scheduler instances — whether in separate processes on one machine or across multiple hosts — you need a distributed event broker so every instance reacts to changes made by the others.
+
+## LocalEventBroker
+
+`LocalEventBroker` is the default. It dispatches events in-memory within the current process using no external services.
+
+```python
+from apscheduler import AsyncScheduler
+
+# LocalEventBroker is used automatically when no event_broker is passed
+async with AsyncScheduler() as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+<Note>
+`LocalEventBroker` is only suitable for single-process deployments. It cannot coordinate schedulers running in separate processes or on separate machines.
+</Note>
+
+## RedisEventBroker
+
+`RedisEventBroker` uses Redis Pub/Sub to broadcast events to all connected schedulers. Any scheduler subscribed to the same Redis channel will receive every event.
+
+**Install the extra:**
+
+```bash
+pip install apscheduler[redis]
+```
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `client_or_url` | `Redis \| str` | required | An async Redis client instance or a `redis://...` URL |
+| `channel` | `str` | `"apscheduler"` | The Pub/Sub channel on which to broadcast events |
+| `stop_check_interval` | `float` | `1` | Seconds between checks for whether the listener should stop |
+
+<Note>
+If you pass a client instance, the event broker does not manage its lifecycle. Close the client yourself when you are done.
+</Note>
+
+### Examples
+
+<Tabs>
+  <Tab title="URL string">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.redis import RedisEventBroker
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = RedisEventBroker("redis://localhost")
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Client instance">
+    ```python
+    from redis.asyncio import Redis
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.redis import RedisEventBroker
+
+    redis_client = Redis.from_url("redis://localhost")
+    event_broker = RedisEventBroker(redis_client, channel="myapp-scheduler")
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+
+    await redis_client.aclose()
+    ```
+  </Tab>
+</Tabs>
+
+## MQTTEventBroker
+
+`MQTTEventBroker` uses an MQTT broker (v3.1 or v5) to broadcast events. This is a good fit for IoT deployments or environments where an MQTT broker is already present.
+
+**Install the extra:**
+
+```bash
+pip install apscheduler[mqtt]
+```
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `host` | `str` | `"localhost"` | MQTT broker hostname or UNIX socket path |
+| `port` | `int \| None` | `None` | Port number — defaults to 1883 (TCP), 8883 (TLS), 80 (WebSocket), or 443 (WebSocket+TLS) |
+| `transport` | `str` | `"tcp"` | One of `"tcp"`, `"websocket"`, or `"unix"` |
+| `client_id` | `str \| None` | `None` | MQTT client ID — set this to resume a session after a dropped connection |
+| `ssl` | `bool \| SSLContext` | `False` | `True` to use default TLS, or pass a custom `ssl.SSLContext` |
+| `topic` | `str` | `"apscheduler"` | MQTT topic on which to publish and subscribe |
+| `subscribe_qos` | `int` | `0` | MQTT QoS level for subscriptions (0, 1, or 2) |
+| `publish_qos` | `int` | `0` | MQTT QoS level for published messages (0, 1, or 2) |
+
+### Examples
+
+<Tabs>
+  <Tab title="Basic (TCP)">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.mqtt import MQTTEventBroker
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = MQTTEventBroker(host="localhost", port=1883)
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="With TLS">
+    ```python
+    import ssl
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.mqtt import MQTTEventBroker
+
+    tls_context = ssl.create_default_context()
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = MQTTEventBroker(
+        host="mqtt.example.com",
+        ssl=tls_context,
+        topic="myapp/scheduler",
+        subscribe_qos=1,
+        publish_qos=1,
+    )
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+</Tabs>
+
+## AsyncpgEventBroker
+
+`AsyncpgEventBroker` uses PostgreSQL's built-in `NOTIFY`/`LISTEN` mechanism to broadcast events. It requires no additional infrastructure beyond the PostgreSQL database you may already be using as your data store.
+
+**Install the extra:**
+
+```bash
+pip install apscheduler[asyncpg]
+```
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dsn` | `str` | required | A libpq connection string, e.g. `postgres://user:pass@host/dbname` |
+| `options` | `Mapping[str, Any]` | `{}` | Extra keyword arguments forwarded to `asyncpg.connect()` |
+| `channel` | `str` | `"apscheduler"` | The `NOTIFY` channel name |
+| `max_idle_time` | `float` | `10` | Seconds of inactivity before a keepalive query (`SELECT 1`) is sent |
+
+You can also construct an `AsyncpgEventBroker` from an existing SQLAlchemy async engine using the `from_async_sqla_engine()` class method, which reads the connection details from the engine URL.
+
+### Examples
+
+<Tabs>
+  <Tab title="From SQLAlchemy engine">
+    ```python
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    data_store = SQLAlchemyDataStore(engine)
+    event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="From DSN string">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+    from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = AsyncpgEventBroker(
+        "postgres://user:password@localhost/mydb",
+        channel="myapp-scheduler",
+    )
+
+    async with AsyncScheduler(data_store, event_broker) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+PostgreSQL's `NOTIFY` payload is limited to 7999 bytes. If a serialized event exceeds that limit, `AsyncpgEventBroker` raises a `SerializationError`. In practice this is rarely a problem, but if it occurs, switch to the Redis or MQTT broker.
+</Note>
+
+## Choosing a broker
+
+| Scenario | Recommended broker |
+|---|---|
+| Single process | `LocalEventBroker` (default) |
+| Multiple processes on one machine | `RedisEventBroker` or `AsyncpgEventBroker` |
+| Multiple machines (already using PostgreSQL) | `AsyncpgEventBroker` |
+| Multiple machines (Redis already in stack) | `RedisEventBroker` |
+| IoT or MQTT infrastructure | `MQTTEventBroker` |
+
+<Tip>
+`AsyncpgEventBroker` is a natural fit if you are already using PostgreSQL as your data store — it reuses the same database and requires no extra services.
+</Tip>

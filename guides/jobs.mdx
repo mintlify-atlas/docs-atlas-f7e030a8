@@ -1,0 +1,274 @@
+---
+title: "Running Jobs in APScheduler"
+description: "Understand how jobs are created from schedules, how to run or queue jobs directly, retrieve results, and use job context variables inside task functions."
+---
+
+A job is a single request for a task to be executed. Jobs are created automatically by the scheduler whenever a schedule's trigger fires, but you can also create them manually to run a task immediately—either waiting for the result or firing and forgetting.
+
+## How jobs are created from schedules
+
+When the scheduler processes a due schedule, it calls the schedule's trigger to calculate all fire times up to the present. For each fire time (subject to the schedule's coalesce policy), the scheduler creates a `Job` object, stores it in the data store, and hands it off to the appropriate job executor. Once the executor finishes, the result is written back to the data store and the job is marked as complete.
+
+Jobs inherit their configuration from the schedule that spawned them: the task callable, executor, argument list, misfire grace time, and metadata are all copied from the schedule at the moment the job is created.
+
+---
+
+## Running a job directly
+
+### `run_job()` — fire and wait
+
+`run_job()` is the simplest way to execute a task immediately and get its return value. It submits the job, waits for it to complete, and returns the result (or re-raises any exception the task raised).
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from apscheduler import Scheduler
+
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    with Scheduler() as scheduler:
+        result = scheduler.run_job(add, args=(3, 4))
+        print(result)  # 7
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from apscheduler import AsyncScheduler
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            result = await scheduler.run_job(add, args=(3, 4))
+            print(result)  # 7
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+`run_job()` accepts the following keyword arguments:
+
+| Parameter | Description |
+|---|---|
+| `args` | Positional arguments to pass to the callable |
+| `kwargs` | Keyword arguments to pass to the callable |
+| `job_executor` | Override the executor for this single run |
+| `metadata` | JSON-compatible dict of custom metadata for this job |
+
+---
+
+### `add_job()` — fire and continue
+
+`add_job()` submits a job without waiting for it to finish. It returns the `UUID` of the newly created job. Use this when you want to queue work asynchronously and either don't need the result, or plan to retrieve it later.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from datetime import timedelta
+    from apscheduler import Scheduler
+
+    def crunch_numbers(n: int) -> int:
+        return n * n
+
+    with Scheduler() as scheduler:
+        job_id = scheduler.add_job(
+            crunch_numbers,
+            args=(42,),
+            result_expiration_time=timedelta(minutes=5),
+        )
+        print(f"Job queued: {job_id}")
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from datetime import timedelta
+    from apscheduler import AsyncScheduler
+
+    async def crunch_numbers(n: int) -> int:
+        return n * n
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            job_id = await scheduler.add_job(
+                crunch_numbers,
+                args=(42,),
+                result_expiration_time=timedelta(minutes=5),
+            )
+            print(f"Job queued: {job_id}")
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+If `result_expiration_time` is `0` (the default), the job result is discarded immediately after the job completes and cannot be retrieved with `get_job_result()`. Set an appropriate expiration time if you intend to fetch the result later.
+</Warning>
+
+---
+
+### `get_job_result()` — retrieve a deferred result
+
+After adding a job with `add_job()`, call `get_job_result()` with the returned job ID to retrieve the result. By default this call waits until the job finishes. Pass `wait=False` to return immediately and raise `JobLookupError` if the result is not yet available.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from datetime import timedelta
+    from apscheduler import Scheduler
+
+    def slow_task() -> str:
+        return "done"
+
+    with Scheduler() as scheduler:
+        job_id = scheduler.add_job(
+            slow_task,
+            result_expiration_time=timedelta(minutes=1),
+        )
+        result = scheduler.get_job_result(job_id)
+        if result:
+            print(result.return_value)  # "done"
+            print(result.outcome)       # JobOutcome.success
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from datetime import timedelta
+    from apscheduler import AsyncScheduler
+
+    async def slow_task() -> str:
+        return "done"
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            job_id = await scheduler.add_job(
+                slow_task,
+                result_expiration_time=timedelta(minutes=1),
+            )
+            result = await scheduler.get_job_result(job_id)
+            if result:
+                print(result.return_value)  # "done"
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Listing pending jobs
+
+`get_jobs()` returns all jobs that are currently stored in the data store (queued or running). This is useful for monitoring and administration.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    jobs = scheduler.get_jobs()
+    for job in jobs:
+        print(job.id, job.task_id, job.scheduled_fire_time)
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    jobs = await scheduler.get_jobs()
+    for job in jobs:
+        print(job.id, job.task_id, job.scheduled_fire_time)
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## JobResult structure
+
+`get_job_result()` returns a `JobResult` object (or `None` if the result has already expired). Its fields are:
+
+| Field | Type | Description |
+|---|---|---|
+| `job_id` | `UUID` | ID of the job this result belongs to |
+| `outcome` | `JobOutcome` | How the job ended (see below) |
+| `started_at` | `datetime \| None` | When the executor started the job |
+| `finished_at` | `datetime` | When the job finished or was discarded |
+| `expires_at` | `datetime` | When the result will be purged from the data store |
+| `return_value` | `Any` | The value returned by the task function (only set when `outcome` is `success`) |
+| `exception` | `BaseException \| None` | The exception raised (only set when `outcome` is `error`) |
+
+---
+
+## JobOutcome values
+
+The `outcome` field of a `JobResult` is one of the following `JobOutcome` enum values:
+
+| Value | Meaning |
+|---|---|
+| `JobOutcome.success` | The task function returned normally |
+| `JobOutcome.error` | The task function raised an exception (stored in `exception`) |
+| `JobOutcome.missed_start_deadline` | The job was not started within `misfire_grace_time` of its scheduled time |
+| `JobOutcome.deserialization_failed` | The job's arguments or callable could not be deserialized |
+| `JobOutcome.cancelled` | The job was cancelled before or during execution |
+| `JobOutcome.abandoned` | The worker running the job stopped unexpectedly before the job could be marked as done |
+
+```python
+from apscheduler import JobOutcome
+
+result = scheduler.run_job(my_task)
+# run_job() re-raises exceptions, so you only reach here on success
+
+result = scheduler.get_job_result(job_id)
+if result.outcome is JobOutcome.success:
+    print("Return value:", result.return_value)
+elif result.outcome is JobOutcome.error:
+    print("Exception:", result.exception)
+elif result.outcome is JobOutcome.missed_start_deadline:
+    print("Job started too late and was discarded")
+```
+
+---
+
+## Context variables
+
+APScheduler exposes three context variables that are accessible from within any running task function. These use Python's `contextvars` module and are set automatically by the scheduler before calling the task callable.
+
+| Variable | Type | Description |
+|---|---|---|
+| `current_scheduler` | `Scheduler` | The synchronous scheduler instance running the job |
+| `current_async_scheduler` | `AsyncScheduler` | The asynchronous scheduler instance running the job |
+| `current_job` | `Job` | The `Job` object representing the currently executing job |
+
+Access them by calling `.get()` on the context variable:
+
+```python
+from apscheduler import current_job, current_scheduler
+
+def my_task():
+    job = current_job.get()
+    print(f"Job ID: {job.id}")
+    print(f"Scheduled fire time: {job.scheduled_fire_time}")
+    if job.schedule_id:
+        print(f"Spawned from schedule: {job.schedule_id}")
+```
+
+<Tip>
+Use `current_job` to implement logging, observability, or conditional logic that depends on how the job was triggered. The `schedule_id` field is `None` for jobs created directly via `add_job()` or `run_job()`.
+</Tip>
+
+The `Job` object exposed by `current_job` has these fields available at runtime:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Unique job identifier |
+| `task_id` | `str` | ID of the task being run |
+| `args` | `tuple` | Positional arguments the callable was called with |
+| `kwargs` | `dict` | Keyword arguments the callable was called with |
+| `schedule_id` | `str \| None` | ID of the originating schedule, if any |
+| `scheduled_fire_time` | `datetime \| None` | The trigger fire time the job was created for |
+| `jitter` | `timedelta` | Random time added to the scheduled fire time |
+| `start_deadline` | `datetime \| None` | Deadline after which the job is considered misfired |
+| `created_at` | `datetime` | When the job was added to the data store |
+| `metadata` | `dict` | Custom metadata inherited from the schedule or task |

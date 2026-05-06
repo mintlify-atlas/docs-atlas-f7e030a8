@@ -1,0 +1,178 @@
+---
+title: "CronTrigger — Cron-Style Scheduling Reference"
+description: "API reference for CronTrigger: fires jobs at times matching cron-style field expressions for year, month, day, weekday, hour, minute, and second."
+---
+
+`CronTrigger` fires whenever the current time matches all of the specified field constraints, following the same model as a Unix cron scheduler. Each field accepts a flexible expression syntax — wildcards, ranges, steps, lists, and named values — giving you fine-grained control over when jobs run. Unspecified fields default to their minimum value (or wildcard for fields that carry no position significance), so you only need to specify what matters.
+
+## Constructor parameters
+
+```python
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = CronTrigger(
+    year=None,
+    month=None,
+    day=None,
+    week=None,
+    day_of_week=None,
+    hour=None,
+    minute=None,
+    second=None,
+    start_time=None,   # defaults to datetime.now()
+    end_time=None,
+    timezone=None,     # defaults to local timezone
+)
+```
+
+All parameters are keyword-only.
+
+<ParamField path="year" type="int | str">
+  4-digit year. Valid range: `1970`–`9999`. Accepts any field expression (see below). Defaults to `*` when any higher-specificity field is set, otherwise `*`.
+</ParamField>
+
+<ParamField path="month" type="int | str">
+  Month of the year. Valid range: `1`–`12`. Accepts numeric expressions or named abbreviations: `jan`, `feb`, `mar`, `apr`, `may`, `jun`, `jul`, `aug`, `sep`, `oct`, `nov`, `dec`. Defaults to `1` when no higher-specificity field is set.
+</ParamField>
+
+<ParamField path="day" type="int | str">
+  Day of the month. Valid range: `1`–`31` (capped to the actual month length). Also accepts the special value `last` to target the last day of the month, and positional weekday expressions such as `1st mon` or `last fri`.
+</ParamField>
+
+<ParamField path="week" type="int | str">
+  ISO week number. Valid range: `1`–`53`. This is a virtual field — it filters results but does not directly map to a `datetime` attribute.
+</ParamField>
+
+<ParamField path="day_of_week" type="int | str">
+  Day of the week. Accepts numeric values `0`–`6` (where `0` = Monday) or named abbreviations: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`. Note that `0` and `7` both resolve to Sunday when entered numerically, matching cron convention. **Monday is always the first weekday.** This is a virtual field.
+</ParamField>
+
+<ParamField path="hour" type="int | str">
+  Hour of the day. Valid range: `0`–`23`. Defaults to `0` when not specified.
+</ParamField>
+
+<ParamField path="minute" type="int | str">
+  Minute of the hour. Valid range: `0`–`59`. Defaults to `0` when not specified.
+</ParamField>
+
+<ParamField path="second" type="int | str">
+  Second of the minute. Valid range: `0`–`59`. Defaults to `0` when not specified.
+</ParamField>
+
+<ParamField path="start_time" type="datetime">
+  Earliest possible datetime to trigger on. Naive datetimes are interpreted in the trigger's `timezone`. Defaults to `datetime.now()` at the time the trigger is created.
+</ParamField>
+
+<ParamField path="end_time" type="datetime">
+  Latest possible datetime to trigger on. The trigger returns `None` once any calculated next time would exceed this value. Naive datetimes are interpreted in the trigger's `timezone`.
+</ParamField>
+
+<ParamField path="timezone" type="tzinfo | str">
+  Time zone used for all datetime calculations. Accepts a `tzinfo` instance or an IANA timezone string (e.g. `"America/New_York"`). Defaults to the local system timezone.
+</ParamField>
+
+## Field expression syntax
+
+Every time field accepts one or more comma-separated expressions. The supported expression types are:
+
+| Expression | Meaning | Example |
+|---|---|---|
+| `*` | Every value in the valid range | `*` |
+| `*/step` | Every `step`-th value starting from the minimum | `*/5` (every 5th) |
+| `value` | Exact value | `3` |
+| `first-last` | Inclusive range | `1-5` |
+| `first-last/step` | Range with step | `0-12/3` |
+| `a,b,c` | Comma-separated list of any of the above | `mon,wed,fri` |
+| `jan`–`dec` | Named month (month field only) | `jan`, `aug-oct` |
+| `mon`–`sun` | Named weekday (day_of_week field only) | `mon-fri`, `sat,sun` |
+| `last` | Last day of the month (day field only) | `last` |
+| `Nth weekday` | Positional weekday in month (day field only) | `1st mon`, `last fri` |
+
+## `from_crontab()` classmethod
+
+Creates a `CronTrigger` from a standard five-field crontab expression.
+
+```python
+@classmethod
+def from_crontab(
+    cls,
+    expr: str,
+    *,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    timezone: tzinfo | str = "local",
+) -> CronTrigger
+```
+
+The `expr` argument must contain exactly five space-separated fields in standard crontab order:
+
+```
+minute  hour  day-of-month  month  day-of-week
+```
+
+<ParamField path="expr" type="str" required>
+  A standard five-field crontab expression. Fields are: `minute hour day month day_of_week`.
+</ParamField>
+
+<ParamField path="start_time" type="datetime">
+  Earliest possible datetime to trigger on. Defaults to `datetime.now()`.
+</ParamField>
+
+<ParamField path="end_time" type="datetime">
+  Latest possible datetime to trigger on.
+</ParamField>
+
+<ParamField path="timezone" type="tzinfo | str">
+  Time zone for calculations. Defaults to the local system timezone.
+</ParamField>
+
+## Examples
+
+### Every day at 9:00 AM
+
+```python
+from apscheduler.triggers.cron import CronTrigger
+
+trigger = CronTrigger(hour=9)
+```
+
+### Every weekday (Monday–Friday) at 9:00 AM
+
+```python
+trigger = CronTrigger(day_of_week="mon-fri", hour=9)
+```
+
+### Every 15 minutes
+
+```python
+trigger = CronTrigger(minute="*/15")
+```
+
+### First day of each month at midnight
+
+```python
+trigger = CronTrigger(day=1, hour=0, minute=0, second=0)
+```
+
+### Every weekday at 10:00 AM, only in January and July
+
+```python
+trigger = CronTrigger(month="jan,jul", day_of_week="mon-fri", hour=10)
+```
+
+### Using `from_crontab()`
+
+```python
+from apscheduler.triggers.cron import CronTrigger
+import zoneinfo
+
+# Every day at 9:30 AM Eastern time
+trigger = CronTrigger.from_crontab(
+    "30 9 * * *",
+    timezone=zoneinfo.ZoneInfo("America/New_York"),
+)
+```
+
+<Note>
+  `CronTrigger` uses Monday as weekday `0`. Numeric values `0`–`6` map to Mon–Sun. Both `0` and `7` resolve to Sunday to maintain compatibility with standard crontab conventions.
+</Note>

@@ -1,0 +1,67 @@
+---
+title: "MemoryDataStore — In-Memory Data Store Reference"
+description: "API reference for MemoryDataStore, APScheduler's default in-process store for schedules, jobs, and tasks — no external service or configuration needed."
+---
+
+`MemoryDataStore` is the default data store used by APScheduler when no other store is configured. It holds all scheduler state — tasks, schedules, jobs, and job results — in Python dictionaries and lists inside the running process. No serialization takes place, so objects are stored as-is in memory.
+
+Because the store is entirely in-process, it can be shared between multiple schedulers running in the same event loop without any additional configuration.
+
+<Warning>
+  All data is lost when the process exits. Do not use `MemoryDataStore` in production
+  if schedule or job persistence across restarts is required.
+</Warning>
+
+## Constructor parameters
+
+`MemoryDataStore` is defined with `@attrs.define` and exposes no public constructor parameters. All internal state (task registry, schedule list, job queue, job result cache) is initialized automatically.
+
+```python
+from apscheduler.datastores.memory import MemoryDataStore
+
+store = MemoryDataStore()
+```
+
+The store is the implicit default when you create a scheduler without specifying a data store, so explicit instantiation is only necessary when you want to share one instance between multiple schedulers.
+
+## Usage example
+
+```python
+import asyncio
+from apscheduler.schedulers.async_ import AsyncScheduler
+from apscheduler.datastores.memory import MemoryDataStore
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    store = MemoryDataStore()
+
+    async with AsyncScheduler(data_store=store) as scheduler:
+        scheduler.add_schedule(my_task, "interval", seconds=10)
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+## Multi-scheduler sharing
+
+Because the store keeps all state in memory, every scheduler that shares the same `MemoryDataStore` instance must run inside the same event loop. Passing the same instance to schedulers in different threads or processes is not supported.
+
+```python
+async def main():
+    store = MemoryDataStore()
+
+    async with AsyncScheduler(data_store=store) as s1:
+        async with AsyncScheduler(data_store=store) as s2:
+            # Both schedulers share the same in-memory state
+            ...
+```
+
+<Note>
+  For multi-process or multi-host deployments, use a persistent store such as
+  `SQLAlchemyDataStore` or `MongoDBDataStore` instead.
+</Note>

@@ -1,0 +1,197 @@
+---
+title: "Building Custom APScheduler Extensions"
+description: "Build custom APScheduler extensions — triggers, job executors, and data stores — by implementing the abstract base class interfaces in apscheduler.abc."
+---
+
+APScheduler is designed to be extended. If the built-in triggers, job executors, or data stores don't cover your use case, you can implement your own by inheriting from the abstract base classes in `apscheduler.abc`. Each extension point has a well-defined interface you must satisfy, and the scheduler will use your implementation transparently.
+
+## Custom triggers
+
+The built-in triggers cover most scheduling needs, especially when composed with `AndTrigger` and `OrTrigger`. For specialized scheduling logic — such as pulling fire times from an external calendar or database — you can write a custom trigger.
+
+Inherit from `apscheduler.abc.Trigger` and implement three methods:
+
+```python
+from __future__ import annotations
+
+from datetime import datetime
+from apscheduler.abc import Trigger
+
+
+class MyCustomTrigger(Trigger):
+    def next(self) -> datetime | None:
+        # Return the next fire time, or None when exhausted
+        ...
+
+    def __getstate__(self):
+        # Return a serializable snapshot of the trigger's state
+        ...
+
+    def __setstate__(self, state) -> None:
+        # Restore the trigger from the value returned by __getstate__()
+        ...
+```
+
+### Rules for `next()`
+
+<CardGroup cols={1}>
+  <Card title="Always timezone-aware">
+    `next()` must return a timezone-aware `datetime` object, or `None` when there are no more fire times.
+  </Card>
+  <Card title="Strictly monotonic">
+    `next()` must never return the same `datetime` twice, and never a datetime earlier than the one previously returned.
+  </Card>
+  <Card title="Stateful">
+    Update the trigger's internal state before returning, so the next call to `next()` advances to the following fire time.
+  </Card>
+</CardGroup>
+
+### Serialization rules
+
+`__getstate__()` must return a value that contains only types serializable by the configured `Serializer`. `__setstate__()` must accept that return value and restore the trigger to a functionally equivalent state.
+
+<Note>
+  Trigger code does **not** need to be thread-safe. APScheduler calls trigger methods from a single thread.
+</Note>
+
+---
+
+## Custom job executors
+
+Job executors determine how a callable is actually invoked when a job fires. The default executor runs callables directly on the event loop thread (for async functions) or in a thread pool. If you need to dispatch work to a different runtime — a process pool, a remote task queue, or a third-party framework — write a custom executor.
+
+Inherit from `apscheduler.abc.JobExecutor` and implement `run_job()`:
+
+```python
+from collections.abc import Callable
+from functools import partial
+from typing import Any
+
+from anyio import to_thread
+from apscheduler import Job
+from apscheduler.abc import JobExecutor
+
+
+class ThreadJobExecutor(JobExecutor):
+    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:
+        wrapped = partial(func, *job.args, **job.kwargs)
+        return await to_thread.run_sync(wrapped)
+```
+
+`run_job()` receives:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `func` | `Callable` | The callable to invoke |
+| `job` | `Job` | The job instance carrying `args` and `kwargs` |
+
+You must call `func` with `job.args` and `job.kwargs` and return its return value.
+
+### Initialization with `start()`
+
+If your executor needs to set up resources before processing any jobs (connection pools, semaphores, capacity limiters), override the `start()` method. The example below adds a configurable thread cap using AnyIO's `CapacityLimiter`:
+
+```python
+from collections.abc import Callable
+from contextlib import AsyncExitStack
+from functools import partial
+from typing import Any
+
+from anyio import CapacityLimiter, to_thread
+from apscheduler import Job
+from apscheduler.abc import JobExecutor
+
+
+class ThreadJobExecutor(JobExecutor):
+    _limiter: CapacityLimiter
+
+    def __init__(self, max_threads: int) -> None:
+        self.max_threads = max_threads
+
+    async def start(self, exit_stack: AsyncExitStack) -> None:
+        self._limiter = CapacityLimiter(self.max_threads)
+
+    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:
+        wrapped = partial(func, *job.args, **job.kwargs)
+        return await to_thread.run_sync(wrapped, limiter=self._limiter)
+```
+
+The `exit_stack` parameter is an `AsyncExitStack` that is processed when the scheduler shuts down. Use it to register any async context managers your executor depends on.
+
+---
+
+## Custom data stores
+
+If you need to persist scheduler state in a storage backend not covered by the built-in stores (SQLAlchemy, MongoDB), you can implement your own.
+
+Inherit from `apscheduler.abc.DataStore` and implement all of its abstract methods.
+
+### Skeleton
+
+```python
+from contextlib import AsyncExitStack
+from logging import Logger
+
+from apscheduler.abc import DataStore, EventBroker
+
+
+class MyCustomDataStore(DataStore):
+    _event_broker: EventBroker
+
+    async def start(
+        self,
+        exit_stack: AsyncExitStack,
+        event_broker: EventBroker,
+        logger: Logger,
+    ) -> None:
+        # Save references and perform initialization
+        self._event_broker = event_broker
+
+    # Implement the remaining abstract methods...
+```
+
+### Abstract methods to implement
+
+<Steps>
+  <Step title="Lifecycle">
+    `start(exit_stack, event_broker, logger)` — initialize the store. Save the event broker so you can publish events as data changes.
+  </Step>
+  <Step title="Tasks">
+    `add_task(task)`, `remove_task(task_id)`, `get_task(task_id)`, `get_tasks()`
+  </Step>
+  <Step title="Schedules">
+    `add_schedule(schedule, conflict_policy)`, `remove_schedules(ids)`, `get_schedules(ids)`, `acquire_schedules(scheduler_id, lease_duration, limit)`, `release_schedules(scheduler_id, results)`, `get_next_schedule_run_time()`, `extend_acquired_schedule_leases(scheduler_id, schedule_ids, duration)`
+  </Step>
+  <Step title="Jobs">
+    `add_job(job)`, `get_jobs(ids)`, `acquire_jobs(scheduler_id, lease_duration, limit)`, `release_job(scheduler_id, job, result)`, `get_job_result(job_id)`, `extend_acquired_job_leases(scheduler_id, job_ids, duration)`, `reap_abandoned_jobs(scheduler_id)`
+  </Step>
+  <Step title="Maintenance">
+    `cleanup()` — purge expired job results, release expired job leases, and remove finished schedules with no running jobs.
+  </Step>
+</Steps>
+
+### Handling temporary failures
+
+<Note>
+  If you plan to publish your data store, implement retry logic for transient connectivity errors using the [Tenacity](https://pypi.org/project/tenacity/) library, which is also used by the built-in stores.
+</Note>
+
+Only retry on *temporary* errors like network timeouts or connection resets — not on permanent errors like authentication failures or missing databases. Retrying permanent errors will produce an infinite loop.
+
+```python
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+import asyncpg
+
+
+class MyCustomDataStore(DataStore):
+    @retry(
+        retry=retry_if_exception_type(asyncpg.TooManyConnectionsError),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=stop_after_attempt(5),
+    )
+    async def add_job(self, job):
+        # Implementation that might temporarily fail
+        ...
+```
+
+See the [Tenacity documentation](https://tenacity.readthedocs.io/) and the built-in data store implementations for guidance on selecting the right exception types to retry on.

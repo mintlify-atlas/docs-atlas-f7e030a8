@@ -1,133 +1,91 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "APScheduler: Python Task Scheduling Library"
+description: "APScheduler is a powerful Python task scheduler and job queue supporting cron, interval, and calendar triggers with persistent stores and async support."
 ---
 
-## Setting up
+APScheduler is an in-process task scheduler and job queue for Python. It lets you schedule Python callables to run at specific times, on fixed intervals, or using cron-like expressions — with full support for persistent storage, distributed deployments, and both synchronous and asynchronous workflows.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a scheduler running in minutes with your first scheduled task.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Core Concepts" icon="book" href="/concepts">
+    Understand tasks, schedules, jobs, triggers, data stores, and event brokers.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Triggers" icon="clock" href="/guides/triggers">
+    Schedule with cron, intervals, calendar rules, or combine multiple triggers.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/scheduler">
+    Full API documentation for schedulers, triggers, stores, and brokers.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why APScheduler?
 
-Everything you need to create world-class documentation.
+APScheduler scales from simple single-process scripts to large distributed deployments with multiple workers sharing a common data store.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Sync & Async" icon="arrows-left-right">
+    Works with both traditional thread-based applications and asyncio/Trio async code.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Persistent Schedules" icon="database">
+    Store schedules in PostgreSQL, MySQL, SQLite, or MongoDB — survives restarts.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Distributed Scaling" icon="network-wired">
+    Run multiple schedulers against a shared store with Redis, MQTT, or PostgreSQL event brokers.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Flexible Triggers" icon="calendar">
+    Cron, interval, calendar-based, one-off, or combined triggers for any scheduling need.
   </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## Get started
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Install APScheduler">
+    ```bash
+    pip install apscheduler
+    ```
+    Install optional extras for persistent storage or distributed brokers as needed.
+  </Step>
+  <Step title="Define a task function">
+    ```python
+    def send_report():
+        print("Sending daily report...")
+    ```
+    Any Python callable — function, method, or class with `__call__` — can be a task.
+  </Step>
+  <Step title="Create a scheduler and add a schedule">
+    ```python
+    from apscheduler import Scheduler
+    from apscheduler.triggers.cron import CronTrigger
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    with Scheduler() as scheduler:
+        scheduler.add_schedule(send_report, CronTrigger(hour=9))
+        scheduler.run_until_stopped()
+    ```
+  </Step>
+</Steps>
 
-## Need inspiration?
+## Explore the docs
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Scheduling guides" icon="calendar-days" href="/guides/schedules">
+    Learn to add, pause, remove, and configure schedules with coalesce policies.
+  </Card>
+  <Card title="Data stores" icon="server" href="/guides/data-stores">
+    Use SQLAlchemy or MongoDB for persistent, production-ready job storage.
+  </Card>
+  <Card title="Event brokers" icon="broadcast-tower" href="/guides/event-brokers">
+    Coordinate multiple schedulers with Redis, MQTT, or PostgreSQL event brokers.
+  </Card>
+  <Card title="Extending APScheduler" icon="puzzle-piece" href="/guides/extending">
+    Build custom triggers, job executors, and data store backends.
+  </Card>
+  <Card title="Migration guide" icon="arrow-up-right-dots" href="/migration">
+    Upgrading from APScheduler 3.x? See what changed in version 4.
+  </Card>
+  <Card title="FAQ" icon="circle-question" href="/faq">
+    Answers to common questions about APScheduler.
+  </Card>
+</CardGroup>

@@ -1,0 +1,102 @@
+---
+title: "RedisEventBroker — Redis Event Broker Reference"
+description: "API reference for RedisEventBroker, APScheduler's distributed event broker that uses Redis Pub/Sub to broadcast scheduler events across processes."
+---
+
+`RedisEventBroker` broadcasts scheduler events across processes and hosts using Redis Pub/Sub. Each broker instance subscribes to a configurable channel; when any scheduler publishes an event, all subscribers on that channel receive and deliver it locally. This makes it suitable for multi-process and multi-host APScheduler deployments.
+
+The broker requires the `redis` library (v5.0.1 or later) and uses the asyncio-compatible `redis.asyncio` client.
+
+## Installation
+
+```bash
+pip install apscheduler[redis]
+```
+
+## Constructor parameters
+
+<ParamField path="client_or_url" type="redis.asyncio.Redis | str" required>
+  An asynchronous `redis.asyncio.Redis` client instance, or a Redis URL string
+  (e.g. `"redis://localhost:6379"` or `"redis://user:password@localhost:6379/0"`).
+
+  When a URL string is passed, the broker creates a connection pool and a client
+  internally, and closes them on shutdown. When an existing client instance is passed,
+  the broker uses it as-is and **does not** close it — you must close the client
+  yourself.
+</ParamField>
+
+<ParamField path="channel" type="str" default='"apscheduler"'>
+  The Redis Pub/Sub channel name used to send and receive event notifications. All
+  scheduler instances that share a data store must subscribe to the same channel.
+</ParamField>
+
+<ParamField path="stop_check_interval" type="float" default="1">
+  How often (in seconds) the channel listener checks whether it should stop. A larger
+  value reduces CPU usage but increases shutdown latency.
+</ParamField>
+
+<ParamField path="serializer" type="Serializer" default="JSONSerializer()">
+  The serializer used to encode events before publishing and decode them after receiving.
+  Defaults to `JSONSerializer`. All scheduler instances sharing a channel must use the
+  same serializer.
+</ParamField>
+
+<ParamField path="retry_settings" type="RetrySettings" default="RetrySettings()">
+  Tenacity-based retry configuration controlling how the broker retries after a
+  `redis.ConnectionError`. Defaults to exponential back-off (0.5 s – 20 s) with a
+  60-second total stop deadline.
+</ParamField>
+
+<Note>
+  The broker does not manage the lifecycle of a client instance that you pass in.
+  Call `await client.aclose()` yourself when you are done with it.
+</Note>
+
+## Usage example
+
+```python
+import asyncio
+from redis.asyncio import Redis
+from apscheduler.schedulers.async_ import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.redis import RedisEventBroker
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    event_broker = RedisEventBroker("redis://localhost:6379")
+
+    async with AsyncScheduler(
+        data_store=data_store,
+        event_broker=event_broker,
+    ) as scheduler:
+        scheduler.add_schedule(my_task, "interval", seconds=30)
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+### Passing an existing client
+
+```python
+from redis.asyncio import Redis
+
+client = Redis.from_url("redis://localhost:6379")
+broker = RedisEventBroker(client, channel="myapp-events")
+
+# You must close the client yourself:
+# await client.aclose()
+```
+
+### Redis with authentication and TLS
+
+```python
+broker = RedisEventBroker("rediss://user:password@redis.example.com:6380/0")
+```

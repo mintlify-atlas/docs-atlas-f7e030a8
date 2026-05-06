@@ -1,0 +1,104 @@
+---
+title: "IntervalTrigger — Fixed Interval Scheduling Reference"
+description: "API reference for IntervalTrigger: fires jobs at a fixed elapsed time interval, configurable in weeks, days, hours, minutes, seconds, and microseconds."
+---
+
+`IntervalTrigger` fires jobs on a fixed time interval — the same elapsed duration between every successive execution. The first trigger time is `start_time`, which defaults to the moment the trigger is created. Each subsequent fire time is exactly one interval after the previous one. If an `end_time` is provided, the trigger stops producing fire times once the next calculated time would exceed it.
+
+## Constructor parameters
+
+```python
+from apscheduler.triggers.interval import IntervalTrigger
+
+trigger = IntervalTrigger(
+    weeks=0,
+    days=0,
+    hours=0,
+    minutes=0,
+    seconds=0,
+    microseconds=0,
+    start_time=None,   # defaults to datetime.now()
+    end_time=None,
+)
+```
+
+All parameters are keyword-only. At least one interval component must be positive; a total interval of zero or less raises `ValueError`.
+
+<ParamField path="weeks" type="float" default="0">
+  Number of weeks in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="days" type="float" default="0">
+  Number of days in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="hours" type="float" default="0">
+  Number of hours in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="minutes" type="float" default="0">
+  Number of minutes in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="seconds" type="float" default="0">
+  Number of seconds in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="microseconds" type="float" default="0">
+  Number of microseconds in the interval. Can be fractional.
+</ParamField>
+
+<ParamField path="start_time" type="datetime">
+  The first datetime to fire at. Subsequent fire times are calculated by repeatedly adding the interval to this anchor. Naive datetimes are accepted; timezone-aware datetimes are used as-is. Defaults to `datetime.now()` at construction time.
+</ParamField>
+
+<ParamField path="end_time" type="datetime">
+  Latest possible datetime to fire at. The trigger returns `None` once the next calculated fire time would exceed this value. Must not be earlier than `start_time`.
+</ParamField>
+
+## Examples
+
+### Every 5 minutes
+
+```python
+from apscheduler.triggers.interval import IntervalTrigger
+
+trigger = IntervalTrigger(minutes=5)
+```
+
+### Every 2 hours starting at a specific time
+
+```python
+from datetime import datetime
+import zoneinfo
+
+trigger = IntervalTrigger(
+    hours=2,
+    start_time=datetime(2024, 1, 1, 8, 0, 0, tzinfo=zoneinfo.ZoneInfo("UTC")),
+)
+```
+
+### Every 30 seconds, stopping after a fixed end time
+
+```python
+from datetime import datetime
+import zoneinfo
+
+tz = zoneinfo.ZoneInfo("UTC")
+
+trigger = IntervalTrigger(
+    seconds=30,
+    start_time=datetime(2024, 6, 1, 0, 0, 0, tzinfo=tz),
+    end_time=datetime(2024, 6, 1, 1, 0, 0, tzinfo=tz),
+)
+```
+
+### Every 1 week and 2 days
+
+```python
+trigger = IntervalTrigger(weeks=1, days=2)
+```
+
+<Note>
+  The total interval is computed as a single `timedelta` from all six components. A zero or negative total raises `ValueError` at construction time.
+</Note>

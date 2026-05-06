@@ -1,0 +1,640 @@
+---
+title: "AsyncScheduler — APScheduler Async API Reference"
+description: "Complete API reference for the AsyncScheduler class, APScheduler's native async engine built on AnyIO with full asyncio and Trio support."
+---
+
+`AsyncScheduler` is the native async scheduler at the heart of APScheduler. It is built
+on [AnyIO](https://anyio.readthedocs.io/) and works on both `asyncio` and
+[Trio](https://trio.readthedocs.io/). All data store and event broker operations are
+awaited natively, making it efficient in async web frameworks (FastAPI, Starlette,
+aiohttp) and any other async Python application. If you are working in a synchronous
+context, use the `Scheduler` wrapper instead, which runs `AsyncScheduler` in a
+background thread.
+
+<Note>
+  When running on Trio, make sure that any data store and event broker you choose also
+  support Trio's concurrency model.
+</Note>
+
+## Constructor
+
+```python
+from apscheduler import AsyncScheduler
+
+scheduler = AsyncScheduler(
+    data_store=None,
+    event_broker=None,
+    identity="",
+    role=SchedulerRole.both,
+    max_concurrent_jobs=100,
+    cleanup_interval=timedelta(minutes=15),
+    lease_duration=timedelta(seconds=30),
+    task_defaults=TaskDefaults(),
+)
+```
+
+<ParamField path="data_store" type="DataStore" default="MemoryDataStore()">
+  The data store used to persist tasks, schedules, and jobs. Defaults to an in-memory
+  store. Use a persistent store (SQLAlchemy, MongoDB) for production deployments where
+  state must survive restarts.
+</ParamField>
+
+<ParamField path="event_broker" type="EventBroker" default="LocalEventBroker()">
+  The event broker used to publish and subscribe to scheduler events. Defaults to a
+  local, in-process broker. Use a distributed broker (Redis, MQTT, asyncpg) in
+  multi-node deployments.
+</ParamField>
+
+<ParamField path="identity" type="str" default='""'>
+  A unique string identifier for this scheduler instance. When left empty, a name is
+  generated automatically from the hostname, PID, and object ID. Set an explicit value
+  in multi-node deployments to make lease records and logs easier to trace.
+</ParamField>
+
+<ParamField path="role" type="SchedulerRole" default="SchedulerRole.both">
+  Controls what the scheduler does while running.
+
+  | Value | Description |
+  |---|---|
+  | `SchedulerRole.scheduler` | Processes due schedules into jobs, but does not execute jobs |
+  | `SchedulerRole.worker` | Executes queued jobs, but does not process schedules |
+  | `SchedulerRole.both` | Both processes schedules and executes jobs (default) |
+</ParamField>
+
+<ParamField path="max_concurrent_jobs" type="int" default="100">
+  Maximum number of jobs this scheduler will run simultaneously. Once the limit is
+  reached, new jobs are not picked up until a running job finishes.
+</ParamField>
+
+<ParamField path="cleanup_interval" type="timedelta | None" default="timedelta(minutes=15)">
+  How often the scheduler automatically calls `cleanup()` to remove expired job results
+  and finished schedules. Accepts a `timedelta` or a number of seconds. Set to `None`
+  to disable automatic cleanup.
+</ParamField>
+
+<ParamField path="lease_duration" type="timedelta" default="timedelta(seconds=30)">
+  Maximum time the scheduler may hold a lease on a schedule or job before other
+  schedulers are allowed to claim it. Accepts a `timedelta` or a number of seconds.
+</ParamField>
+
+<ParamField path="task_defaults" type="TaskDefaults" default="TaskDefaults()">
+  Default settings applied to newly configured tasks.
+
+  `TaskDefaults` fields:
+
+  | Field | Type | Default |
+  |---|---|---|
+  | `job_executor` | `str` | first key in `job_executors` (`"async"`) |
+  | `max_running_jobs` | `int \| None` | `1` |
+  | `misfire_grace_time` | `timedelta \| None` | `None` |
+  | `metadata` | `dict` | `{}` |
+
+  Unlike `Scheduler`, `AsyncScheduler` defaults `job_executor` to `"async"` (the
+  first executor in the built-in executor map).
+</ParamField>
+
+## Differences from `Scheduler`
+
+`AsyncScheduler` and `Scheduler` share the same public interface, but there are a few
+important differences:
+
+- All methods on `AsyncScheduler` are `async` and must be awaited.
+- Use `async with` instead of `with` to manage the scheduler's lifecycle.
+- The default `job_executor` in `task_defaults` is `"async"`, not `"threadpool"`.
+- `subscribe()` is the one synchronous method; it returns a `Subscription` immediately
+  without needing to be awaited.
+
+## Async context manager
+
+`AsyncScheduler` implements the async context manager protocol. Using it as an async
+context manager initializes the data store and event broker and ensures clean shutdown
+when the block exits.
+
+```python
+async with AsyncScheduler() as scheduler:
+    await scheduler.add_schedule(my_task, IntervalTrigger(seconds=30))
+    await scheduler.run_until_stopped()
+```
+
+### `__aenter__`
+
+```python
+async def __aenter__(self) -> AsyncScheduler
+```
+
+Initializes the data store, event broker, and internal task group. Returns the
+scheduler instance.
+
+### `__aexit__`
+
+```python
+async def __aexit__(
+    self,
+    exc_type: type[BaseException] | None,
+    exc_val: BaseException | None,
+    exc_tb: TracebackType | None,
+) -> None
+```
+
+Stops the scheduler and releases all resources.
+
+## Running the scheduler
+
+### `run_until_stopped`
+
+```python
+async def run_until_stopped(self) -> None
+```
+
+Starts the scheduler and suspends the current task until `stop()` is called. This
+method handles its own initialization, so you do not need to use the async context
+manager when calling it directly.
+
+**Raises:** `RuntimeError` — if the scheduler is not currently in the `stopped` state.
+
+```python
+import asyncio
+import signal
+from apscheduler import AsyncScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+async def main():
+    scheduler = AsyncScheduler()
+
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(scheduler.stop()))
+
+    await scheduler.add_schedule(my_task, IntervalTrigger(hours=1))
+    await scheduler.run_until_stopped()
+
+asyncio.run(main())
+```
+
+### `start_in_background`
+
+```python
+async def start_in_background(self) -> None
+```
+
+Starts the scheduler as a background task within the current async task group and
+returns immediately. The scheduler must have been entered as an async context manager
+before calling this method.
+
+**Raises:** `RuntimeError` — if the scheduler has not been initialized (not used as an
+async context manager).
+
+```python
+async with AsyncScheduler() as scheduler:
+    await scheduler.start_in_background()
+
+    # Add schedules while the scheduler is already running
+    await scheduler.add_schedule(my_task, IntervalTrigger(minutes=5))
+
+    # Keep the application alive
+    await anyio.sleep_forever()
+```
+
+### `stop`
+
+```python
+async def stop(self) -> None
+```
+
+Signals the scheduler to stop processing schedules and jobs. Returns immediately
+without waiting for the scheduler to fully stop. Call `wait_until_stopped()` if you
+need to block until the scheduler has settled.
+
+## Task configuration
+
+### `configure_task`
+
+```python
+async def configure_task(
+    func_or_task_id: Task | str | Callable[..., Any],
+    *,
+    func: Callable[..., Any] = unset,
+    job_executor: str = unset,
+    misfire_grace_time: float | timedelta | None = unset,
+    max_running_jobs: int | None = unset,
+    metadata: dict = unset,
+) -> Task
+```
+
+Creates or updates a task definition in the data store.
+
+When called with a callable, the fully qualified name of the callable is used as the
+task ID. When updating an existing task, only explicitly supplied keyword arguments are
+changed; everything else stays as-is. New tasks inherit unset values from the
+scheduler's `task_defaults`.
+
+<ParamField path="func_or_task_id" type="Task | str | Callable" required>
+  The task to configure. Pass a callable to create or update the task whose ID matches
+  its fully qualified name. Pass a string task ID or an existing `Task` object to
+  update a pre-existing task.
+</ParamField>
+
+<ParamField path="func" type="Callable | unset" default="unset">
+  A callable to associate with the task. Only needed when `func_or_task_id` is a string
+  task ID and you want to (re-)assign the callable.
+</ParamField>
+
+<ParamField path="job_executor" type="str | unset" default="unset">
+  Name of the job executor to use for this task (e.g. `"async"`, `"threadpool"`,
+  `"processpool"`).
+</ParamField>
+
+<ParamField path="misfire_grace_time" type="float | timedelta | None | unset" default="unset">
+  Maximum number of seconds a job's actual start time may lag behind its scheduled start
+  time before the job is considered misfired and skipped.
+</ParamField>
+
+<ParamField path="max_running_jobs" type="int | None | unset" default="unset">
+  Maximum number of instances of this task allowed to run concurrently. `None` means
+  unlimited.
+</ParamField>
+
+<ParamField path="metadata" type="dict | unset" default="unset">
+  JSON-compatible key-value pairs to attach to the task. Merged with the scheduler's
+  `task_defaults.metadata`.
+</ParamField>
+
+**Returns:** The created or updated `Task` object.
+
+**Raises:** `TypeError` — if `func_or_task_id` is not a `Task`, a non-empty string, or
+a callable.
+
+```python
+async with AsyncScheduler() as scheduler:
+    await scheduler.configure_task(
+        fetch_data,
+        job_executor="async",
+        max_running_jobs=5,
+    )
+```
+
+## Schedules
+
+### `add_schedule`
+
+```python
+async def add_schedule(
+    func_or_task_id: Task | str | Callable[..., Any],
+    trigger: Trigger,
+    *,
+    id: str | None = None,
+    args: Iterable[Any] | None = None,
+    kwargs: Mapping[str, Any] | None = None,
+    paused: bool = False,
+    coalesce: CoalescePolicy = CoalescePolicy.latest,
+    job_executor: str = unset,
+    misfire_grace_time: float | timedelta | None = unset,
+    metadata: dict = unset,
+    max_jitter: float | timedelta | None = None,
+    job_result_expiration_time: float | timedelta = 0,
+    conflict_policy: ConflictPolicy = ConflictPolicy.do_nothing,
+) -> str
+```
+
+Schedules a task to run according to the given trigger.
+
+<ParamField path="func_or_task_id" type="Task | str | Callable" required>
+  The callable or task ID to schedule. If a callable is passed and no matching task
+  exists, one is created automatically.
+</ParamField>
+
+<ParamField path="trigger" type="Trigger" required>
+  The trigger that determines scheduled fire times (e.g. `IntervalTrigger`,
+  `CronTrigger`, `DateTrigger`).
+</ParamField>
+
+<ParamField path="id" type="str | None" default="None">
+  An explicit string identifier for the schedule. Omit to auto-generate a UUID-based ID.
+</ParamField>
+
+<ParamField path="args" type="Iterable[Any] | None" default="None">
+  Positional arguments to pass to the task callable on each run.
+</ParamField>
+
+<ParamField path="kwargs" type="Mapping[str, Any] | None" default="None">
+  Keyword arguments to pass to the task callable on each run.
+</ParamField>
+
+<ParamField path="paused" type="bool" default="False">
+  Start the schedule in a paused state. No jobs will be created until the schedule is
+  unpaused.
+</ParamField>
+
+<ParamField path="coalesce" type="CoalescePolicy" default="CoalescePolicy.latest">
+  What to do when multiple fire times have accumulated since the last scheduler run.
+
+  | Value | Description |
+  |---|---|
+  | `CoalescePolicy.earliest` | Run once, using the earliest overdue fire time |
+  | `CoalescePolicy.latest` | Run once, using the most recent overdue fire time (default) |
+  | `CoalescePolicy.all` | Submit one job for every overdue fire time |
+</ParamField>
+
+<ParamField path="job_executor" type="str | unset" default="unset">
+  Name of the job executor to use for jobs created from this schedule.
+</ParamField>
+
+<ParamField path="misfire_grace_time" type="float | timedelta | None | unset" default="unset">
+  Maximum lateness (in seconds or as a `timedelta`) allowed for a job before it is
+  considered misfired. Falls back to the task's `misfire_grace_time` when not set.
+</ParamField>
+
+<ParamField path="metadata" type="dict | unset" default="unset">
+  JSON-compatible key-value pairs attached to every job created from this schedule.
+</ParamField>
+
+<ParamField path="max_jitter" type="float | timedelta | None" default="None">
+  Maximum random duration added to each scheduled fire time to spread load.
+</ParamField>
+
+<ParamField path="job_result_expiration_time" type="float | timedelta" default="0">
+  Minimum time to keep job results in the data store for jobs created by this schedule.
+  `0` means results are not stored.
+</ParamField>
+
+<ParamField path="conflict_policy" type="ConflictPolicy" default="ConflictPolicy.do_nothing">
+  What to do if a schedule with the same `id` already exists.
+
+  | Value | Description |
+  |---|---|
+  | `ConflictPolicy.do_nothing` | Keep the existing schedule (default) |
+  | `ConflictPolicy.replace` | Replace the existing schedule |
+  | `ConflictPolicy.exception` | Raise an exception |
+</ParamField>
+
+**Returns:** The string ID of the newly added schedule.
+
+```python
+from apscheduler.triggers.cron import CronTrigger
+
+async with AsyncScheduler() as scheduler:
+    schedule_id = await scheduler.add_schedule(
+        generate_report,
+        CronTrigger(hour=6, minute=0),
+        id="morning-report",
+        kwargs={"recipients": ["team@example.com"]},
+        conflict_policy=ConflictPolicy.replace,
+    )
+    await scheduler.run_until_stopped()
+```
+
+### `get_schedule`
+
+```python
+async def get_schedule(id: str) -> Schedule
+```
+
+Retrieves a single schedule from the data store by its ID.
+
+**Raises:** `ScheduleLookupError` — if no schedule with the given ID exists.
+
+### `get_schedules`
+
+```python
+async def get_schedules() -> list[Schedule]
+```
+
+Retrieves all schedules from the data store. Returns an empty list when there are none.
+
+### `remove_schedule`
+
+```python
+async def remove_schedule(id: str) -> None
+```
+
+Permanently removes the schedule with the given ID from the data store.
+
+### `pause_schedule`
+
+```python
+async def pause_schedule(id: str) -> None
+```
+
+Marks the schedule as paused. While paused, the schedule is still stored but no new
+jobs are created from it.
+
+### `unpause_schedule`
+
+```python
+async def unpause_schedule(
+    id: str,
+    *,
+    resume_from: datetime | Literal["now"] | None = None,
+) -> None
+```
+
+Resumes a paused schedule.
+
+<ParamField path="id" type="str" required>
+  The ID of the schedule to unpause.
+</ParamField>
+
+<ParamField path="resume_from" type='datetime | "now" | None' default="None">
+  Controls where in the trigger sequence the schedule picks up.
+
+  - `None` — resume from where the schedule left off; may cause misfires.
+  - `"now"` — shorthand for `datetime.now(tz=UTC)`; skips all past fire times.
+  - A specific `datetime` — advance the trigger until its next fire time is at or after
+    the given datetime.
+</ParamField>
+
+## Jobs
+
+### `add_job`
+
+```python
+async def add_job(
+    func_or_task_id: Task | str | Callable[..., Any],
+    *,
+    args: Iterable[Any] | None = None,
+    kwargs: Mapping[str, Any] | None = None,
+    job_executor: str = unset,
+    metadata: dict = unset,
+    result_expiration_time: timedelta | float = 0,
+) -> UUID
+```
+
+Enqueues a one-off job immediately without going through the scheduling machinery.
+
+<ParamField path="func_or_task_id" type="Task | str | Callable" required>
+  The callable or task ID to run. If a callable is given and no matching task exists,
+  one is created automatically.
+</ParamField>
+
+<ParamField path="args" type="Iterable[Any] | None" default="None">
+  Positional arguments to pass to the task callable.
+</ParamField>
+
+<ParamField path="kwargs" type="Mapping[str, Any] | None" default="None">
+  Keyword arguments to pass to the task callable.
+</ParamField>
+
+<ParamField path="job_executor" type="str | unset" default="unset">
+  Name of the job executor to use, overriding the task-level setting.
+</ParamField>
+
+<ParamField path="metadata" type="dict | unset" default="unset">
+  JSON-compatible key-value pairs attached to the job.
+</ParamField>
+
+<ParamField path="result_expiration_time" type="timedelta | float" default="0">
+  Minimum time to retain the job result. `0` means the result is not stored.
+</ParamField>
+
+**Returns:** The `UUID` of the newly created job.
+
+```python
+async with AsyncScheduler() as scheduler:
+    job_id = await scheduler.add_job(
+        process_upload,
+        kwargs={"file_id": "abc123"},
+        result_expiration_time=timedelta(minutes=5),
+    )
+```
+
+### `get_job_result`
+
+```python
+async def get_job_result(job_id: UUID, *, wait: bool = True) -> JobResult | None
+```
+
+Retrieves the result of a previously submitted job.
+
+<ParamField path="job_id" type="UUID" required>
+  The UUID of the job, as returned by `add_job()`.
+</ParamField>
+
+<ParamField path="wait" type="bool" default="True">
+  When `True`, suspends the current task until the job finishes. When `False`, raises
+  `JobLookupError` if the result is not yet available.
+</ParamField>
+
+**Returns:** A `JobResult` object, or `None` if the job completed but its result
+expiration time passed before this call was made.
+
+**Raises:** `JobLookupError` — if neither the job nor its result are in the data store,
+or if `wait=False` and the result is not yet available.
+
+```python
+async with AsyncScheduler() as scheduler:
+    job_id = await scheduler.add_job(compute_total, result_expiration_time=60)
+    result = await scheduler.get_job_result(job_id)
+    if result and result.outcome == JobOutcome.success:
+        print(result.return_value)
+```
+
+### `run_job`
+
+```python
+async def run_job(
+    func_or_task_id: str | Callable[..., Any],
+    *,
+    args: Iterable[Any] | None = None,
+    kwargs: Mapping[str, Any] | None = None,
+    job_executor: str = unset,
+    metadata: dict = unset,
+) -> Any
+```
+
+Convenience method that adds a job, awaits its completion, and returns the result.
+If the job raised an exception, that exception is re-raised in the calling coroutine.
+
+<ParamField path="func_or_task_id" type="str | Callable" required>
+  The callable or task ID to run.
+</ParamField>
+
+<ParamField path="args" type="Iterable[Any] | None" default="None">
+  Positional arguments passed to the task callable.
+</ParamField>
+
+<ParamField path="kwargs" type="Mapping[str, Any] | None" default="None">
+  Keyword arguments passed to the task callable.
+</ParamField>
+
+<ParamField path="job_executor" type="str | unset" default="unset">
+  Name of the job executor to use.
+</ParamField>
+
+<ParamField path="metadata" type="dict | unset" default="unset">
+  JSON-compatible key-value pairs attached to the job.
+</ParamField>
+
+**Returns:** The return value of the task function.
+
+**Raises:**
+- `JobDeadlineMissed` — if the job missed its start deadline.
+- `JobCancelled` — if the job was cancelled before it ran.
+- Any exception raised by the task function itself.
+
+```python
+async with AsyncScheduler() as scheduler:
+    result = await scheduler.run_job(add_numbers, kwargs={"x": 3, "y": 4})
+    print(result)  # 7
+```
+
+### `get_jobs`
+
+```python
+async def get_jobs() -> Sequence[Job]
+```
+
+Retrieves all jobs currently held in the data store.
+
+## Events
+
+### `subscribe`
+
+```python
+def subscribe(
+    callback: Callable[[Event], Any],
+    event_types: type[Event] | Iterable[type[Event]] | None = None,
+    *,
+    one_shot: bool = False,
+    is_async: bool = True,
+) -> Subscription
+```
+
+Registers a callback to be invoked whenever a matching event is published. This method
+is **synchronous** and does not need to be awaited — it returns a `Subscription`
+immediately.
+
+<ParamField path="callback" type="Callable[[Event], Any]" required>
+  A callable that receives the event object. May be a regular function or a coroutine
+  function.
+</ParamField>
+
+<ParamField path="event_types" type="type[Event] | Iterable[type[Event]] | None" default="None">
+  An event class or iterable of event classes to filter on. When `None`, all event types
+  are delivered to the callback.
+</ParamField>
+
+<ParamField path="one_shot" type="bool" default="False">
+  When `True`, the subscription is automatically cancelled after the first matching
+  event is delivered.
+</ParamField>
+
+<ParamField path="is_async" type="bool" default="True">
+  Relevant only for synchronous (non-coroutine) callbacks. When `True`, the callback is
+  called on the event loop thread. When `False`, it is dispatched to a worker thread.
+  This flag is ignored if `callback` is a coroutine function.
+</ParamField>
+
+**Returns:** A `Subscription` object. Call `.unsubscribe()` on it to cancel, or use it
+as a context manager.
+
+**Raises:** `RuntimeError` — if the scheduler has not been initialized.
+
+```python
+from apscheduler import SchedulerStarted, SchedulerStopped
+
+async with AsyncScheduler() as scheduler:
+    async def on_started(event: SchedulerStarted) -> None:
+        print("Scheduler is up!")
+
+    scheduler.subscribe(on_started, SchedulerStarted, one_shot=True)
+    await scheduler.run_until_stopped()
+```

@@ -1,0 +1,193 @@
+---
+title: "Job Executors in APScheduler"
+description: "Configure AsyncJobExecutor, ThreadPoolJobExecutor, ProcessPoolJobExecutor, and QtJobExecutor to control how APScheduler runs your jobs."
+---
+
+A job executor is responsible for actually calling the function associated with a job. APScheduler ships with four executors: an async executor for coroutines and lightweight functions, a thread pool executor for blocking I/O-bound work, a process pool executor for CPU-bound work, and a Qt executor for GUI applications. Each scheduler automatically registers all four under default names, so you can select them per task or per schedule.
+
+## Default executor registration
+
+When you create a scheduler without specifying `job_executors`, APScheduler registers these executors automatically:
+
+| Name | Executor | Default for new tasks |
+|---|---|---|
+| `"async"` | `AsyncJobExecutor` | Yes (first registered) |
+| `"threadpool"` | `ThreadPoolJobExecutor` | No |
+| `"processpool"` | `ProcessPoolJobExecutor` | No |
+
+You can override this by passing a custom `job_executors` mapping:
+
+```python
+from apscheduler import AsyncScheduler
+from apscheduler.executors.async_ import AsyncJobExecutor
+from apscheduler.executors.thread import ThreadPoolJobExecutor
+
+async with AsyncScheduler(
+    job_executors={
+        "async": AsyncJobExecutor(),
+        "threadpool": ThreadPoolJobExecutor(max_workers=20),
+    }
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+## AsyncJobExecutor
+
+`AsyncJobExecutor` runs functions directly on the event loop thread. If the callable returns an awaitable (a coroutine, for example), it is awaited and the result is used as the job's return value. Non-async callables are also supported and run synchronously on the event loop.
+
+`AsyncJobExecutor` has no constructor parameters.
+
+```python
+from apscheduler.executors.async_ import AsyncJobExecutor
+
+executor = AsyncJobExecutor()
+```
+
+**Use this executor for:**
+- Async functions (`async def`)
+- Fast, non-blocking synchronous functions
+- Any work that should not leave the event loop thread
+
+<Warning>
+Do not use `AsyncJobExecutor` for blocking I/O or CPU-intensive work. Blocking the event loop degrades the responsiveness of the entire scheduler. Use `ThreadPoolJobExecutor` or `ProcessPoolJobExecutor` instead.
+</Warning>
+
+## ThreadPoolJobExecutor
+
+`ThreadPoolJobExecutor` runs functions in a thread pool managed by anyio. It is the right choice for blocking I/O-bound work such as database calls made through synchronous drivers, file operations, or HTTP requests using a synchronous library.
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_workers` | `int` | `40` | Maximum number of worker threads to keep in the pool |
+
+```python
+from apscheduler.executors.thread import ThreadPoolJobExecutor
+
+executor = ThreadPoolJobExecutor(max_workers=10)
+```
+
+**Use this executor for:**
+- Blocking database queries
+- Synchronous HTTP calls
+- File I/O
+
+## ProcessPoolJobExecutor
+
+`ProcessPoolJobExecutor` runs functions in a separate process using anyio's process pool. Each job is pickled, sent to a worker process, executed there, and the result is pickled and returned. This bypasses the Python GIL, making it suitable for CPU-bound work.
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_workers` | `int` | `40` | Maximum number of worker processes to keep in the pool |
+
+```python
+from apscheduler.executors.subprocess import ProcessPoolJobExecutor
+
+executor = ProcessPoolJobExecutor(max_workers=4)
+```
+
+**Use this executor for:**
+- CPU-bound computation (image processing, data transformation, etc.)
+- Workloads that must bypass the GIL
+
+<Warning>
+Because jobs are pickled to cross the process boundary, all task arguments and return values must be picklable. Lambdas, nested functions, and instances of classes that do not support pickling cannot be used with this executor.
+</Warning>
+
+## QtJobExecutor
+
+`QtJobExecutor` runs functions on the Qt main thread using Qt signals. This is required whenever a job needs to interact with Qt widgets or any other Qt object that must be accessed from the main GUI thread.
+
+`QtJobExecutor` supports both PySide6 and PyQt6 and has no constructor parameters.
+
+```python
+from apscheduler.executors.qt import QtJobExecutor
+
+executor = QtJobExecutor()
+```
+
+**Use this executor for:**
+- Updating Qt widgets from a scheduled job
+- Any Qt operation that must happen on the main thread
+
+## Configuring executors on the scheduler
+
+Pass a `job_executors` dictionary when creating the scheduler. The first key in the mapping becomes the default executor for all tasks that do not specify one explicitly.
+
+```python
+from apscheduler import AsyncScheduler
+from apscheduler.executors.async_ import AsyncJobExecutor
+from apscheduler.executors.thread import ThreadPoolJobExecutor
+from apscheduler.executors.subprocess import ProcessPoolJobExecutor
+
+async with AsyncScheduler(
+    job_executors={
+        "async": AsyncJobExecutor(),
+        "threadpool": ThreadPoolJobExecutor(max_workers=10),
+        "processpool": ProcessPoolJobExecutor(max_workers=4),
+    }
+) as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+## Setting the executor per task or schedule
+
+You can select a specific executor when configuring a task or adding a schedule by passing `job_executor` with the registered name:
+
+<Tabs>
+  <Tab title="Per task (decorator)">
+    ```python
+    from apscheduler import task
+
+    @task(job_executor="threadpool")
+    def fetch_data():
+        # Blocking I/O — runs in a thread pool
+        import requests
+        return requests.get("https://api.example.com/data").json()
+    ```
+  </Tab>
+  <Tab title="Per task (configure_task)">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    async with AsyncScheduler() as scheduler:
+        scheduler.configure_task(
+            "fetch_data",
+            func=fetch_data,
+            job_executor="threadpool",
+        )
+        await scheduler.add_schedule(
+            "fetch_data",
+            IntervalTrigger(minutes=1),
+        )
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Per schedule">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    async with AsyncScheduler() as scheduler:
+        await scheduler.add_schedule(
+            my_function,
+            IntervalTrigger(minutes=1),
+            job_executor="processpool",
+        )
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+</Tabs>
+
+## Executor selection summary
+
+| Executor | Best for | Blocks event loop? |
+|---|---|---|
+| `AsyncJobExecutor` | Async functions and fast sync code | No |
+| `ThreadPoolJobExecutor` | Blocking I/O | No |
+| `ProcessPoolJobExecutor` | CPU-bound work | No |
+| `QtJobExecutor` | Qt GUI interaction | No |

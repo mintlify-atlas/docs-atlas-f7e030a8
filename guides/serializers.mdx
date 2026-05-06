@@ -1,0 +1,204 @@
+---
+title: "Serializers for Persistent APScheduler Stores"
+description: "Choose and configure a serializer to convert Python objects to bytes when using persistent data stores like SQLAlchemy or MongoDB."
+---
+
+When APScheduler uses a persistent data store — such as SQLAlchemy or MongoDB — it must convert triggers, job arguments, and other Python objects into bytes for storage, then restore them on retrieval. Serializers handle this conversion. Choosing the right serializer involves a trade-off between compatibility, security, and type fidelity.
+
+## The `Serializer` interface
+
+All serializers implement two methods from `apscheduler.abc.Serializer`:
+
+```python
+class Serializer:
+    def serialize(self, obj: object) -> bytes:
+        """Convert a Python object to bytes."""
+        ...
+
+    def deserialize(self, serialized: bytes) -> object:
+        """Restore a Python object from bytes."""
+        ...
+```
+
+Every serializer must handle at minimum:
+
+- All standard JSON types (`str`, `int`, `float`, `bool`, `None`, `list`, `dict`)
+- `datetime.date` and `datetime.datetime`
+- `datetime.timedelta`
+- `datetime.tzinfo` (time zone objects)
+
+Any class that implements `__getstate__()` and `__setstate__()` can also be serialized by all built-in serializers.
+
+---
+
+## Built-in serializers
+
+<Tabs>
+  <Tab title="PickleSerializer">
+
+### PickleSerializer (default)
+
+`PickleSerializer` uses Python's built-in `pickle` module. It requires no additional dependencies and can serialize nearly any Python object.
+
+```python
+from apscheduler.serializers.pickle import PickleSerializer
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `protocol` | `int` | `4` | Pickle protocol version. Protocol 4 supports most Python 3.4+ types. |
+
+**Usage:**
+
+```python
+from apscheduler.serializers.pickle import PickleSerializer
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+serializer = PickleSerializer()
+data_store = SQLAlchemyDataStore(engine, serializer=serializer)
+```
+
+Because `PickleSerializer` is the default, you only need to pass it explicitly when you want to change the protocol version:
+
+```python
+serializer = PickleSerializer(protocol=5)
+```
+
+<Warning>
+  `PickleSerializer` is **not safe** if the storage backend is accessible to untrusted parties. Deserializing a maliciously crafted pickle payload can execute arbitrary code. Only use `PickleSerializer` when you fully control and trust the entire system — both the data written to the store and the processes that read from it.
+</Warning>
+
+  </Tab>
+  <Tab title="JSONSerializer">
+
+### JSONSerializer
+
+`JSONSerializer` encodes objects as UTF-8 JSON. It requires no extra dependencies.
+
+```python
+from apscheduler.serializers.json import JSONSerializer
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `magic_key` | `str` | `"_apscheduler_json"` | Dict key used to tag serialized arbitrary objects |
+| `dump_options` | `dict` | `{}` | Extra keyword arguments forwarded to `json.dumps` |
+| `load_options` | `dict` | `{}` | Extra keyword arguments forwarded to `json.loads` |
+
+**Usage:**
+
+```python
+from apscheduler.serializers.json import JSONSerializer
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+serializer = JSONSerializer()
+data_store = SQLAlchemyDataStore(engine, serializer=serializer)
+```
+
+**What it serializes natively:**
+
+- All standard JSON types
+- `datetime.date` / `datetime.datetime` — via `isoformat()`
+- `datetime.timedelta` — via `total_seconds()`
+- `datetime.tzinfo` — by extracting the time zone name
+- `uuid.UUID` — via `str()`
+- `enum.Enum` — via `.name`
+- Any class implementing `__getstate__()` / `__setstate__()`
+
+<Note>
+  `JSONSerializer` produces human-readable output, which is useful for debugging stored payloads directly in the database. However, it cannot serialize arbitrary Python types that don't implement `__getstate__()`.
+</Note>
+
+  </Tab>
+  <Tab title="CBORSerializer">
+
+### CBORSerializer
+
+`CBORSerializer` encodes objects using [CBOR](https://cbor.io/) (RFC 8949), a binary format with richer type support than JSON. Install the `cbor2` dependency:
+
+```bash
+pip install "apscheduler[cbor]"
+```
+
+```python
+from apscheduler.serializers.cbor import CBORSerializer
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type_tag` | `int` | `4664` | CBOR tag number used to indicate a serialized arbitrary object |
+| `dump_options` | `dict` | `{}` | Extra keyword arguments forwarded to `cbor2.dumps` |
+| `load_options` | `dict` | `{}` | Extra keyword arguments forwarded to `cbor2.loads` |
+
+**Usage:**
+
+```python
+from apscheduler.serializers.cbor import CBORSerializer
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+serializer = CBORSerializer()
+data_store = SQLAlchemyDataStore(engine, serializer=serializer)
+```
+
+**What it serializes natively (beyond JSON):**
+
+- `datetime.datetime` — as native CBOR datetime
+- `datetime.timedelta` — via `total_seconds()`
+- `datetime.tzinfo` — by extracting the time zone name
+- `enum.Enum` — via `.name`
+- Any class implementing `__getstate__()` / `__setstate__()`
+
+<Tip>
+  CBOR produces more compact binary output than JSON and handles datetime types natively without string conversion. It's a good default for production deployments where human-readability of stored bytes isn't required.
+</Tip>
+
+  </Tab>
+</Tabs>
+
+---
+
+## Passing a serializer to a data store
+
+All persistent data stores accept a `serializer` keyword argument in their constructor. Pass any `Serializer` instance:
+
+```python
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.serializers.cbor import CBORSerializer
+
+engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/mydb")
+serializer = CBORSerializer()
+data_store = SQLAlchemyDataStore(engine, serializer=serializer)
+
+async with AsyncScheduler(data_store) as scheduler:
+    ...
+```
+
+The MongoDB data store accepts the same parameter:
+
+```python
+from apscheduler.datastores.mongodb import MongoDBDataStore
+from apscheduler.serializers.json import JSONSerializer
+
+data_store = MongoDBDataStore("mongodb://localhost", serializer=JSONSerializer())
+```
+
+---
+
+## Choosing a serializer
+
+| Serializer | Extra dependency | Security | Type support | Output |
+|---|---|---|---|---|
+| `PickleSerializer` | None | Low — unsafe with untrusted data | Widest (any picklable type) | Binary |
+| `JSONSerializer` | None | Safe | JSON types + `__getstate__` classes | UTF-8 text |
+| `CBORSerializer` | `cbor2` | Safe | JSON types + datetimes + `__getstate__` classes | Binary |
+
+Use `JSONSerializer` when you want no extra dependencies and human-readable storage. Use `CBORSerializer` when you want compact binary output and better datetime handling. Only use `PickleSerializer` when you need to serialize types that don't support `__getstate__()` and you can fully trust the backing store.

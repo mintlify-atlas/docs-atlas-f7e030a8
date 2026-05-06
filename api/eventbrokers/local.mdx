@@ -1,0 +1,65 @@
+---
+title: "LocalEventBroker — In-Process Event Broker Reference"
+description: "API reference for LocalEventBroker, APScheduler's default broker that delivers scheduler events within a single process without serialization."
+---
+
+`LocalEventBroker` is the default event broker used by APScheduler when no other broker is configured. It delivers scheduler events (schedule added, job acquired, job released, etc.) synchronously within the running process by calling each subscriber's callback directly. No serialization takes place and no network connections are made.
+
+Because delivery is purely in-process, `LocalEventBroker` is not suitable for deployments where multiple scheduler processes need to react to each other's events. For those cases, choose a distributed broker such as `RedisEventBroker` or `AsyncpgEventBroker`.
+
+## Constructor parameters
+
+`LocalEventBroker` has no public constructor parameters. It is defined with `@attrs.define` and all internal state is initialized automatically on startup.
+
+```python
+from apscheduler.eventbrokers.local import LocalEventBroker
+
+broker = LocalEventBroker()
+```
+
+Explicit instantiation is only necessary when you want to pass a pre-configured broker instance to a scheduler. In all other cases, APScheduler instantiates `LocalEventBroker` for you.
+
+## Usage example
+
+```python
+import asyncio
+from apscheduler.schedulers.async_ import AsyncScheduler
+from apscheduler.eventbrokers.local import LocalEventBroker
+from apscheduler._events import JobReleased
+
+
+def my_task():
+    print("Running task")
+
+
+async def main():
+    broker = LocalEventBroker()
+
+    async with AsyncScheduler(event_broker=broker) as scheduler:
+        # Subscribe to events
+        subscription = scheduler.event_broker.subscribe(
+            lambda event: print(f"Event received: {event}"),
+            event_types=[JobReleased],
+        )
+
+        scheduler.add_schedule(my_task, "interval", seconds=10)
+        await scheduler.run_until_stopped()
+
+
+asyncio.run(main())
+```
+
+## When to use `LocalEventBroker`
+
+| Scenario | Recommended broker |
+|---|---|
+| Single-process scheduler | `LocalEventBroker` (default) |
+| Multiple schedulers in the same process | `LocalEventBroker` |
+| Multiple processes on one host | `RedisEventBroker`, `AsyncpgEventBroker`, or `MQTTEventBroker` |
+| Distributed / multi-host deployment | `RedisEventBroker`, `AsyncpgEventBroker`, or `MQTTEventBroker` |
+
+<Note>
+  `LocalEventBroker` does not serialize events. If you later switch to a distributed
+  broker, ensure your event handlers are compatible with the serialized format used
+  by that broker (JSON by default for all external brokers).
+</Note>

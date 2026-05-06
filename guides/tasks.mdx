@@ -1,0 +1,239 @@
+---
+title: "Configuring Tasks in APScheduler"
+description: "Configure APScheduler tasks explicitly using configure_task() or the @task decorator, and understand how settings inherit from task to schedule to job."
+---
+
+A task in APScheduler encapsulates a callable and a set of configuration parameters. It is the bridge between a Python function and the scheduler's execution machinery—defining not just what to call, but how to call it (which executor to use, how many instances may run concurrently, and how late a job may start before being discarded).
+
+## Implicit vs. explicit task creation
+
+In most cases you do not need to explicitly create a task. When you call `add_schedule()` or `add_job()` with a callable, APScheduler automatically creates or updates the underlying task for you using that callable's fully qualified name as the task ID.
+
+Explicit task configuration is necessary when you need to:
+
+- Set task parameters to non-default values
+- Have more than one task mapped to the same callable (with different IDs and settings)
+- Schedule **lambdas**, **nested functions**, or instances of classes that cannot be serialized to a module path
+
+```python
+# Implicit task creation — fine for most use cases
+scheduler.add_schedule(my_function, trigger)
+
+# Required for a lambda — APScheduler cannot construct a reference to it
+task = scheduler.configure_task("send-email", func=lambda: send("hello"))
+scheduler.add_schedule(task, trigger)
+```
+
+---
+
+## Task parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `max_running_jobs` | `1` | Maximum number of concurrently running jobs for this task across all schedules |
+| `misfire_grace_time` | `None` | Maximum lateness (seconds or `timedelta`) before a job is discarded; `None` means no limit |
+| `job_executor` | scheduler default | Name of the executor to run this task's jobs (`"async"`, `"threadpool"`, `"processpool"`) |
+| `metadata` | `{}` | JSON-compatible `dict` of custom key-value pairs attached to the task |
+
+### `max_running_jobs`
+
+By default, only one instance of each task may run at a time. If a new job for the task is about to start but another job for the same task is still running, the newer job is terminated with the outcome `JobOutcome.missed_start_deadline`.
+
+To allow more concurrency, set `max_running_jobs` to a higher integer, or to `None` for no limit.
+
+### `misfire_grace_time`
+
+When a job cannot start on time (for example, because the scheduler was briefly offline), this setting determines how long after the scheduled time the job is still allowed to start. Once the grace period expires, the job is released with the outcome `JobOutcome.missed_start_deadline`.
+
+### `metadata`
+
+Metadata is a `dict` with string keys and JSON-compatible values. It is useful for attaching application-level context (such as team ownership, cost center codes, or environment tags) that you want available on every job created from the task.
+
+---
+
+## Explicit configuration with `configure_task()`
+
+`configure_task()` adds a new task to the data store or updates an existing one. Pass the callable directly, or pass a string task ID together with `func=` to decouple the ID from the Python import path.
+
+<Tabs>
+  <Tab title="Sync">
+    ```python
+    from apscheduler import Scheduler
+
+    def process_batch(batch_id: int) -> None:
+        print(f"Processing batch {batch_id}")
+
+    with Scheduler() as scheduler:
+        # Configure by passing the callable directly
+        scheduler.configure_task(
+            process_batch,
+            max_running_jobs=3,
+            misfire_grace_time=30,
+            job_executor="threadpool",
+        )
+
+        # Or assign a custom task ID
+        scheduler.configure_task(
+            "batch-processor",
+            func=process_batch,
+            max_running_jobs=3,
+        )
+    ```
+  </Tab>
+  <Tab title="Async">
+    ```python
+    import asyncio
+    from apscheduler import AsyncScheduler
+
+    async def process_batch(batch_id: int) -> None:
+        print(f"Processing batch {batch_id}")
+
+    async def main():
+        async with AsyncScheduler() as scheduler:
+            await scheduler.configure_task(
+                process_batch,
+                max_running_jobs=3,
+                misfire_grace_time=30,
+                job_executor="async",
+            )
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## The `@task` decorator
+
+The `@task` decorator lets you annotate a function with its APScheduler configuration at the point of definition. The decorator does not register anything with a scheduler; it attaches the parameters to the function object so they are picked up automatically whenever the function is used with `add_schedule()`, `add_job()`, or `configure_task()`.
+
+```python
+from apscheduler import task
+
+@task(max_running_jobs=5, misfire_grace_time=60, job_executor="threadpool")
+def heavy_computation(input_data: bytes) -> bytes:
+    # CPU-intensive work
+    return process(input_data)
+```
+
+You can also assign a custom task ID via the decorator:
+
+```python
+@task(id="my-custom-task-id", max_running_jobs=2)
+def my_function():
+    pass
+```
+
+<Note>
+A function can only have one set of `@task` parameters. Applying `@task` twice to the same function raises a `ValueError`. If you need multiple tasks backed by the same callable, use `configure_task()` with different IDs instead.
+</Note>
+
+---
+
+## Scheduler-level defaults with `TaskDefaults`
+
+`TaskDefaults` provides fallback values for every task configured on a scheduler. Any task parameter that is not explicitly set will inherit from `TaskDefaults`.
+
+```python
+from apscheduler import Scheduler, TaskDefaults
+
+task_defaults = TaskDefaults(
+    max_running_jobs=1,
+    misfire_grace_time=15,          # seconds, or pass a timedelta
+    job_executor="threadpool",
+    metadata={"env": "production"},
+)
+
+with Scheduler(task_defaults=task_defaults) as scheduler:
+    scheduler.run_until_stopped()
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `job_executor` | first registered executor | Fallback executor name |
+| `max_running_jobs` | `1` | Fallback concurrency limit |
+| `misfire_grace_time` | `None` | Fallback misfire tolerance |
+| `metadata` | `{}` | Fallback metadata merged into every task |
+
+---
+
+## Settings inheritance order
+
+Task parameters are resolved according to a strict priority order. The most specific source always wins:
+
+<Steps>
+  <Step title="configure_task() call">
+    Parameters passed directly to `configure_task()` have the highest priority and override everything else.
+  </Step>
+  <Step title="@task decorator">
+    Parameters bound to the function via the `@task` decorator are used when `configure_task()` does not override them.
+  </Step>
+  <Step title="TaskDefaults">
+    Scheduler-level defaults fill in anything still unset after the two steps above.
+  </Step>
+</Steps>
+
+Schedules and jobs inherit further down the chain:
+
+- **Schedules** inherit settings from their associated task.
+- **Jobs created from a schedule** inherit settings from that schedule.
+- **Jobs created directly** (via `add_job()`) inherit settings from their task.
+
+### Metadata merging
+
+Metadata is an exception to the simple override rule. Instead of being wholly replaced, top-level keys are **merged**: keys set at a more specific level overwrite the same key at a more generic level, but keys that are only present at the generic level are preserved.
+
+```python
+from apscheduler import Scheduler, TaskDefaults, task
+
+@task(max_running_jobs=3, metadata={"source": "decorator"})
+def mytaskfunc():
+    pass
+
+task_defaults = TaskDefaults(
+    misfire_grace_time=15,
+    job_executor="processpool",
+    metadata={"global": 3, "source": "defaults"},
+)
+
+with Scheduler(task_defaults=task_defaults) as scheduler:
+    scheduler.configure_task(
+        "mytask",
+        func=mytaskfunc,
+        job_executor="threadpool",
+        metadata={"direct": True},
+    )
+    # Resulting task:
+    #   job_executor      = "threadpool"      ← from configure_task()
+    #   max_running_jobs  = 3                 ← from @task decorator
+    #   misfire_grace_time = 15               ← from TaskDefaults
+    #   metadata = {"global": 3, "source": "decorator", "direct": True}
+    #              ↑ merged: "global" from defaults, "source" from decorator (wins),
+    #                        "direct" from configure_task()
+```
+
+---
+
+## When to use explicit task configuration
+
+<Accordion title="Lambdas and nested functions">
+APScheduler identifies tasks by a module-level reference such as `mypackage.mymodule:my_function`. Lambda expressions and functions defined inside other functions do not have such a reference, so they must be explicitly configured with a task ID before they can be scheduled.
+
+```python
+scheduler.configure_task("add-one", func=lambda x: x + 1)
+```
+</Accordion>
+
+<Accordion title="Multiple tasks backed by the same callable">
+If you need the same function to run under different configurations (different executors, concurrency limits, or metadata), configure each variant as a separate task with a distinct ID.
+
+```python
+scheduler.configure_task("report-fast", func=run_report, job_executor="threadpool", max_running_jobs=4)
+scheduler.configure_task("report-slow", func=run_report, job_executor="processpool", max_running_jobs=1)
+```
+</Accordion>
+
+<Accordion title="Non-serializable callables">
+When using a persistent data store, APScheduler stores task function references as strings. If a callable cannot be located by its module path (for example, an instance method on an object that is not importable), you must configure the task explicitly and register the callable locally on every scheduler instance.
+</Accordion>

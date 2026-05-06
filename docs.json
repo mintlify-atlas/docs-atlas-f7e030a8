@@ -1,126 +1,118 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "APScheduler",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#5d6c75",
+    "light": "#b5bec1"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/90210882-9c4f-4a73-b3f5-e4697d214d69.png",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/agronholm/apscheduler"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/agronholm/apscheduler"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "concepts"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Scheduling",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "guides/triggers",
+              "guides/schedules",
+              "guides/tasks",
+              "guides/jobs"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Deployment",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/components",
-              "essentials/reusable-snippets"
+              "guides/data-stores",
+              "guides/event-brokers",
+              "guides/executors",
+              "guides/multi-node"
             ]
           },
           {
-            "group": "Agent ready",
+            "group": "Integrations",
             "pages": [
-              "agent-ready/prompt",
-              "agent-ready/visibility",
-              "agent-ready/contextual",
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "guides/integrations",
+              "guides/extending",
+              "guides/serializers"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/events",
+              "reference/exceptions",
+              "migration",
+              "faq"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Schedulers",
             "pages": [
-              "api-reference/introduction"
+              "api/scheduler",
+              "api/async-scheduler"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Triggers",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/triggers/cron",
+              "api/triggers/interval",
+              "api/triggers/calendar-interval",
+              "api/triggers/date",
+              "api/triggers/combining"
+            ]
+          },
+          {
+            "group": "Data Stores",
+            "pages": [
+              "api/datastores/memory",
+              "api/datastores/sqlalchemy",
+              "api/datastores/mongodb"
+            ]
+          },
+          {
+            "group": "Event Brokers",
+            "pages": [
+              "api/eventbrokers/local",
+              "api/eventbrokers/redis",
+              "api/eventbrokers/mqtt",
+              "api/eventbrokers/asyncpg"
+            ]
+          },
+          {
+            "group": "Interfaces",
+            "pages": [
+              "api/abc"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

@@ -1,0 +1,69 @@
+---
+title: "APScheduler: Task Scheduling and Job Queue for Python"
+description: "APScheduler is a Python task scheduler and job queue with cron, interval, and calendar triggers, persistent data stores, and sync/async APIs."
+---
+
+APScheduler (Advanced Python Scheduler) is an in-process task scheduler and job queue for Python. It lets you run any Python callable on a fixed interval, on a cron-like schedule, at a specific date and time, or as soon as possible — with built-in support for persistent storage, distributed multi-node deployments, and both synchronous and asynchronous application models.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Sync and async APIs" icon="arrows-left-right">
+    Use `Scheduler` for thread-based applications or `AsyncScheduler` for asyncio and Trio apps. Both APIs share the same configuration and scheduling interface.
+  </Card>
+  <Card title="Flexible trigger types" icon="clock">
+    Schedule tasks with `CronTrigger`, `IntervalTrigger`, `CalendarIntervalTrigger`, or `DateTrigger`. Combine multiple triggers with `AndTrigger` and `OrTrigger`.
+  </Card>
+  <Card title="Persistent data stores" icon="database">
+    Persist schedules and jobs across restarts using PostgreSQL, MySQL, SQLite (via SQLAlchemy), or MongoDB. The default in-memory store is suitable for development and simple use cases.
+  </Card>
+  <Card title="Distributed deployments" icon="network-wired">
+    Run multiple scheduler instances against a shared data store and coordinate them with an event broker. Supports Redis, MQTT, and PostgreSQL as distributed event brokers.
+  </Card>
+  <Card title="Configurable job executors" icon="microchip">
+    Run jobs in the same async event loop, in a thread pool, or in a process pool. Each task can specify its own executor.
+  </Card>
+  <Card title="Fine-grained job control" icon="sliders">
+    Set concurrency limits per task, misfire grace times, coalesce policies for missed runs, and random jitter on scheduled fire times.
+  </Card>
+</CardGroup>
+
+## Scheduler roles
+
+A scheduler can operate in one of three roles controlled by the `SchedulerRole` enum:
+
+- **`SchedulerRole.both`** — processes due schedules and runs jobs (the default)
+- **`SchedulerRole.scheduler`** — processes schedules only, does not run jobs
+- **`SchedulerRole.worker`** — runs jobs only, does not process schedules
+
+This separation makes it straightforward to build architectures where a web application enqueues work and dedicated worker processes execute it.
+
+## Optional extras
+
+The base `apscheduler` package covers in-memory scheduling. Install extras to unlock external services:
+
+| Extra | Provides |
+|---|---|
+| `sqlalchemy` | SQLAlchemy data store (PostgreSQL, MySQL, SQLite) |
+| `mongodb` | MongoDB data store |
+| `asyncpg` | AsyncPG event broker for PostgreSQL |
+| `redis` | Redis event broker |
+| `mqtt` | MQTT event broker |
+| `cbor` | CBOR serializer (safer alternative to pickle) |
+
+Install one or more extras together:
+
+```bash
+pip install "apscheduler[sqlalchemy,redis]"
+```
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install APScheduler and run your first scheduled task in minutes.
+  </Card>
+  <Card title="Concepts" icon="book" href="/concepts">
+    Understand the core building blocks: tasks, schedules, jobs, triggers, data stores, and more.
+  </Card>
+</CardGroup>

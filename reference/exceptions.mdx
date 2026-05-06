@@ -1,0 +1,300 @@
+---
+title: "APScheduler Exceptions Reference"
+description: "Complete reference for all exceptions raised by APScheduler, including when each is raised, what it means, and how to handle it in your code."
+---
+
+APScheduler raises specific exception types so that you can catch and handle individual failure modes precisely. All exceptions live in `apscheduler._exceptions` and are re-exported from the top-level `apscheduler` package for convenience. The sections below document every exception, the conditions that trigger it, and the recommended handling strategy.
+
+```python
+from apscheduler import (
+    CallableLookupError,
+    ConflictingIdError,
+    DeserializationError,
+    JobCancelled,
+    JobDeadlineMissed,
+    JobLookupError,
+    JobResultNotReady,
+    MaxIterationsReached,
+    ScheduleLookupError,
+    SerializationError,
+    TaskLookupError,
+)
+```
+
+---
+
+## Lookup errors
+
+These exceptions are raised when an object cannot be found by its identifier.
+
+<AccordionGroup>
+  <Accordion title="TaskLookupError">
+    **Inherits:** `LookupError`
+
+    Raised by a data store when it cannot find a task with the given ID.
+
+    **When it occurs:** You call a data store method (or a scheduler method that delegates to the data store) with a `task_id` that does not exist in the store.
+
+    **How to handle it:** Verify that the task has been configured with `scheduler.configure_task()` or the `@task` decorator before attempting to look it up. Check for typos in the task ID string.
+
+    ```python
+    from apscheduler import TaskLookupError
+
+    try:
+        await scheduler.get_task("my-task")
+    except TaskLookupError:
+        print("Task not found — has it been configured?")
+    ```
+  </Accordion>
+
+  <Accordion title="ScheduleLookupError">
+    **Inherits:** `LookupError`
+
+    Raised by a scheduler when it cannot find a schedule with the given ID.
+
+    **When it occurs:** You call `scheduler.remove_schedule()`, `scheduler.pause_schedule()`, `scheduler.unpause_schedule()`, or similar methods with a `schedule_id` that does not exist.
+
+    **How to handle it:** Ensure the schedule was successfully added with `scheduler.add_schedule()` and that its ID is correct. You can also guard with a `ConflictPolicy` to avoid duplicate adds.
+
+    ```python
+    from apscheduler import ScheduleLookupError
+
+    try:
+        scheduler.remove_schedule("nightly-report")
+    except ScheduleLookupError:
+        print("Schedule not found — it may have already been removed")
+    ```
+  </Accordion>
+
+  <Accordion title="JobLookupError">
+    **Inherits:** `LookupError`
+
+    Raised when the data store cannot find a job for update or removal.
+
+    **When it occurs:** You attempt to cancel or query a job by UUID but no job with that ID exists in the data store (e.g., it has already completed and been cleaned up).
+
+    **How to handle it:** Check that you are using the UUID returned from `scheduler.add_job()`. Jobs are removed from the data store after completion, so this error is expected if you hold a stale reference.
+
+    ```python
+    from apscheduler import JobLookupError
+    import uuid
+
+    try:
+        await scheduler.cancel_job(some_uuid)
+    except JobLookupError:
+        print("Job no longer exists in the data store")
+    ```
+  </Accordion>
+
+  <Accordion title="CallableLookupError">
+    **Inherits:** `LookupError`
+
+    Raised when the target callable for a job cannot be found at deserialization time.
+
+    **When it occurs:** APScheduler serializes a reference to your callable (e.g., `mypackage.mymodule:my_function`) and later tries to import it. If the callable no longer exists at that path — because a function was renamed, moved, or the module was restructured — this exception is raised.
+
+    **How to handle it:** Do not rename or move callables that are referenced by persisted schedules or jobs without first clearing those records or updating the stored references. For lambdas and nested functions that cannot be serialized by reference, explicitly configure a task with `scheduler.configure_task()` before scheduling.
+
+    ```python
+    from apscheduler import CallableLookupError
+
+    # This can surface via ScheduleDeserializationFailed or JobDeserializationFailed events
+    def on_deserialization_failed(event):
+        if isinstance(event.exception, CallableLookupError):
+            print(f"Could not find callable for job/schedule {event.job_id!r}")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Job result errors
+
+These exceptions are raised when you call `scheduler.get_job_result()` and the result is not available or reflects a specific terminal state.
+
+<AccordionGroup>
+  <Accordion title="JobResultNotReady">
+    **Inherits:** `Exception`
+
+    Raised by `get_job_result()` when the job has not yet finished executing.
+
+    **When it occurs:** You call `get_job_result()` immediately after `add_job()` without waiting for the job to complete, and the job is still running (or queued).
+
+    **How to handle it:** Use `scheduler.run_job()` if you need to block until the result is available. If you need non-blocking behavior, poll `get_job_result()` or subscribe to the `JobReleased` event to know when to fetch.
+
+    ```python
+    from apscheduler import JobResultNotReady
+
+    job_id = scheduler.add_job(my_task, result_expiration_time=timedelta(minutes=5))
+
+    try:
+        result = scheduler.get_job_result(job_id)
+    except JobResultNotReady:
+        print("Job is still running, try again later")
+    ```
+  </Accordion>
+
+  <Accordion title="JobCancelled">
+    **Inherits:** `Exception`
+
+    Raised by `get_job_result()` when the job was cancelled before it could complete.
+
+    **When it occurs:** The job was explicitly cancelled, or the scheduler shut down before the job finished.
+
+    **How to handle it:** Decide whether to resubmit the job or treat cancellation as a terminal state. Subscribe to `JobReleased` events and check `event.outcome == JobOutcome.cancelled` for monitoring.
+
+    ```python
+    from apscheduler import JobCancelled
+
+    try:
+        result = scheduler.get_job_result(job_id)
+    except JobCancelled:
+        print("Job was cancelled before it could run")
+    ```
+  </Accordion>
+
+  <Accordion title="JobDeadlineMissed">
+    **Inherits:** `Exception`
+
+    Raised by `get_job_result()` when the job failed to start within its allowed time window.
+
+    **When it occurs:** The data store discards a job whose scheduled start time plus `misfire_grace_time` has elapsed before any scheduler could acquire it. The result outcome is `JobOutcome.missed_start_deadline`.
+
+    **How to handle it:** Increase `misfire_grace_time` if jobs are legitimately delayed, or ensure scheduler capacity is sufficient to pick up jobs promptly. Set `misfire_grace_time=None` to disable the deadline entirely (the job will always run eventually).
+
+    ```python
+    from apscheduler import JobDeadlineMissed
+
+    try:
+        result = scheduler.get_job_result(job_id)
+    except JobDeadlineMissed:
+        print("Job missed its start window — consider raising misfire_grace_time")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Scheduling conflicts
+
+<AccordionGroup>
+  <Accordion title="ConflictingIdError">
+    **Inherits:** `KeyError`
+
+    Raised when you try to add a schedule whose ID already exists in the data store and the conflict policy is set to `ConflictPolicy.exception`.
+
+    **When it occurs:** You call `scheduler.add_schedule()` with an explicit `id` that matches an existing schedule, and you passed `conflict_policy=ConflictPolicy.exception`.
+
+    **How to handle it:** Choose an appropriate `ConflictPolicy`:
+    - `ConflictPolicy.replace` — overwrite the existing schedule (most common for application startup).
+    - `ConflictPolicy.do_nothing` — silently keep the existing schedule.
+    - `ConflictPolicy.exception` — raise this error (useful for detecting unexpected duplicates).
+
+    ```python
+    from apscheduler import ConflictingIdError
+    from apscheduler import ConflictPolicy
+
+    try:
+        scheduler.add_schedule(
+            my_task,
+            trigger,
+            id="daily-report",
+            conflict_policy=ConflictPolicy.exception,
+        )
+    except ConflictingIdError:
+        print("A schedule with that ID already exists")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Serialization errors
+
+<AccordionGroup>
+  <Accordion title="SerializationError">
+    **Inherits:** `Exception`
+
+    Raised when a serializer fails to serialize an object.
+
+    **When it occurs:** APScheduler attempts to persist a task argument, schedule, or job to a persistent data store but the serializer (pickle, JSON, CBOR) cannot convert the object to bytes. Common causes include unserializable objects (file handles, locks, database connections) being passed as task arguments.
+
+    **How to handle it:** Ensure all task arguments are serializable by the configured serializer. Avoid passing live objects; pass identifiers instead and reconstruct the object inside the task function.
+
+    ```python
+    from apscheduler import SerializationError
+
+    try:
+        scheduler.add_job(my_task, args=[my_unserializable_obj])
+    except SerializationError as e:
+        print(f"Could not serialize job arguments: {e}")
+    ```
+  </Accordion>
+
+  <Accordion title="DeserializationError">
+    **Inherits:** `Exception`
+
+    Raised when a serializer fails to deserialize bytes into an object.
+
+    **When it occurs:** The data store reads bytes from storage and the serializer cannot reconstruct the original object. This can happen after a code change that alters a class structure, or when using a different serializer than the one used to write the data.
+
+    **How to handle it:** This error is often surfaced indirectly through `ScheduleDeserializationFailed` or `JobDeserializationFailed` events. Investigate what changed in the codebase since the data was written. You may need to clear affected records from the data store or perform a data migration.
+
+    ```python
+    from apscheduler import DeserializationError
+
+    # Surfaces inside ScheduleDeserializationFailed / JobDeserializationFailed events:
+    def on_deser_failed(event):
+        if isinstance(event.exception, DeserializationError):
+            print(f"Deserialization failed: {event.exception}")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Trigger errors
+
+<AccordionGroup>
+  <Accordion title="MaxIterationsReached">
+    **Inherits:** `Exception`
+
+    Raised when a trigger exceeds its maximum allowed computation iterations while trying to calculate the next fire time.
+
+    **When it occurs:** Combining triggers (specifically `AndTrigger`) try to find a point in time where all member triggers agree on the next fire time. If the triggers are configured in a way that makes this impossible or very rare — for example, an `AndTrigger` combining a monthly calendar trigger with a very narrow cron window that never aligns — the search will time out after 1000 iterations by default.
+
+    **How to handle it:** Review the trigger combination for logical conflicts. Widen the cron window, reduce the calendar interval, or set a higher `max_iterations` on `AndTrigger` if you are confident a match will eventually be found.
+
+    ```python
+    from apscheduler import MaxIterationsReached
+    from apscheduler.triggers.combining import AndTrigger
+
+    try:
+        next_time = my_and_trigger.next()
+    except MaxIterationsReached:
+        print("Could not find a valid next fire time — check your trigger configuration")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Exception hierarchy
+
+```
+BaseException
+└── Exception
+    ├── MaxIterationsReached
+    ├── SerializationError
+    ├── DeserializationError
+    ├── JobResultNotReady
+    ├── JobCancelled
+    └── JobDeadlineMissed
+└── LookupError
+    ├── TaskLookupError
+    ├── ScheduleLookupError
+    ├── JobLookupError
+    └── CallableLookupError
+└── KeyError
+    └── ConflictingIdError
+```

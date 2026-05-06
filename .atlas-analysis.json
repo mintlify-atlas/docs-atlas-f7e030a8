@@ -1,0 +1,158 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "APScheduler",
+  "projectDescription": "A task scheduling and job queue library for Python that supports cron-style, interval, calendar, and one-off scheduling with persistent data stores, distributed event brokers, and both sync and async APIs.",
+  "theme": "luma",
+  "primaryColor": "#5d6c75",
+  "lightColor": "#b5bec1",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "concepts"
+            ]
+          },
+          {
+            "group": "Scheduling",
+            "pages": [
+              "guides/triggers",
+              "guides/schedules",
+              "guides/tasks",
+              "guides/jobs"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "guides/data-stores",
+              "guides/event-brokers",
+              "guides/executors",
+              "guides/multi-node"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "guides/integrations",
+              "guides/extending",
+              "guides/serializers"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/events",
+              "reference/exceptions",
+              "migration",
+              "faq"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Schedulers",
+            "pages": [
+              "api/scheduler",
+              "api/async-scheduler"
+            ]
+          },
+          {
+            "group": "Triggers",
+            "pages": [
+              "api/triggers/cron",
+              "api/triggers/interval",
+              "api/triggers/calendar-interval",
+              "api/triggers/date",
+              "api/triggers/combining"
+            ]
+          },
+          {
+            "group": "Data Stores",
+            "pages": [
+              "api/datastores/memory",
+              "api/datastores/sqlalchemy",
+              "api/datastores/mongodb"
+            ]
+          },
+          {
+            "group": "Event Brokers",
+            "pages": [
+              "api/eventbrokers/local",
+              "api/eventbrokers/redis",
+              "api/eventbrokers/mqtt",
+              "api/eventbrokers/asyncpg"
+            ]
+          },
+          {
+            "group": "Interfaces",
+            "pages": [
+              "api/abc"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Cron, interval, calendar-interval, and one-off date scheduling triggers",
+    "Combining triggers (AndTrigger / OrTrigger) for complex schedules",
+    "Both synchronous (Scheduler) and asynchronous (AsyncScheduler / AnyIO) APIs",
+    "Persistent data stores: PostgreSQL, MySQL, SQLite (via SQLAlchemy), MongoDB",
+    "Distributed event brokers: Redis, MQTT, asyncpg / psycopg (PostgreSQL)",
+    "Multiple job executors: async, thread pool, process pool, subprocess, Qt",
+    "Horizontal scaling and high availability via shared data stores",
+    "Coalesce policies and misfire grace time for missed-job handling",
+    "Event subscription system for monitoring scheduler lifecycle and job events",
+    "Pluggable serializers: pickle, JSON, CBOR"
+  ],
+  "publicApiSurface": [
+    "apscheduler.Scheduler",
+    "apscheduler.AsyncScheduler",
+    "apscheduler.triggers.cron.CronTrigger",
+    "apscheduler.triggers.interval.IntervalTrigger",
+    "apscheduler.triggers.calendarinterval.CalendarIntervalTrigger",
+    "apscheduler.triggers.date.DateTrigger",
+    "apscheduler.triggers.combining.AndTrigger",
+    "apscheduler.triggers.combining.OrTrigger",
+    "apscheduler.datastores.memory.MemoryDataStore",
+    "apscheduler.datastores.sqlalchemy.SQLAlchemyDataStore",
+    "apscheduler.datastores.mongodb.MongoDBDataStore",
+    "apscheduler.eventbrokers.local.LocalEventBroker",
+    "apscheduler.eventbrokers.redis.RedisEventBroker",
+    "apscheduler.eventbrokers.mqtt.MQTTEventBroker",
+    "apscheduler.eventbrokers.asyncpg.AsyncpgEventBroker",
+    "apscheduler.eventbrokers.psycopg.PsycopgEventBroker",
+    "apscheduler.executors.async_.AsyncJobExecutor",
+    "apscheduler.executors.thread.ThreadPoolJobExecutor",
+    "apscheduler.executors.subprocess.ProcessPoolJobExecutor",
+    "apscheduler.abc.Trigger",
+    "apscheduler.abc.DataStore",
+    "apscheduler.abc.EventBroker",
+    "apscheduler.abc.JobExecutor",
+    "apscheduler.abc.Serializer",
+    "apscheduler.Task",
+    "apscheduler.Schedule",
+    "apscheduler.Job",
+    "apscheduler.JobResult",
+    "apscheduler.TaskDefaults",
+    "apscheduler.CoalescePolicy",
+    "apscheduler.ConflictPolicy",
+    "apscheduler.JobOutcome",
+    "apscheduler.RunState",
+    "apscheduler.SchedulerRole",
+    "apscheduler.current_scheduler",
+    "apscheduler.current_async_scheduler",
+    "apscheduler.current_job",
+    "apscheduler.task"
+  ]
+}

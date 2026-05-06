@@ -1,0 +1,127 @@
+---
+title: "CalendarIntervalTrigger — Calendar-Based Scheduling"
+description: "API reference for CalendarIntervalTrigger: fires jobs on calendar-aligned intervals in months, years, weeks, or days at a consistent wall-clock time."
+---
+
+`CalendarIntervalTrigger` fires jobs at calendar-aligned intervals rather than fixed elapsed durations. Where `IntervalTrigger` always waits the same number of seconds between fires, `CalendarIntervalTrigger` steps through calendar units — months and years carry variable lengths — so the task always runs on the same day of the month, or the same date of the year, at the same wall-clock time.
+
+The calculation proceeds in two stages: first, `years` and `months` are applied to the previous date (keeping the day of the month constant), advancing the month until a valid date is found. Then `weeks` and `days` are added as a fixed offset. Finally, the date is combined with the configured `hour`, `minute`, and `second` to produce the final `datetime`.
+
+## Constructor parameters
+
+```python
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+
+trigger = CalendarIntervalTrigger(
+    years=0,
+    months=0,
+    weeks=0,
+    days=0,
+    hour=0,
+    minute=0,
+    second=0,
+    start_date=None,   # defaults to date.today()
+    end_date=None,
+    timezone="local",  # defaults to local timezone
+)
+```
+
+All parameters are keyword-only. At least one of `years`, `months`, `weeks`, or `days` must be non-zero; a fully-zero interval raises `ValueError`.
+
+<ParamField path="years" type="int" default="0">
+  Number of years between fires. Applied to the date before `months`.
+</ParamField>
+
+<ParamField path="months" type="int" default="0">
+  Number of months between fires. Applied while keeping the day of the month constant. If the resulting day does not exist in the target month (e.g. the 31st in April), that date is skipped and the next valid date is used.
+</ParamField>
+
+<ParamField path="weeks" type="int" default="0">
+  Number of weeks to add after the year/month calculation. Applied as a fixed day offset.
+</ParamField>
+
+<ParamField path="days" type="int" default="0">
+  Number of days to add after the year/month calculation. Applied as a fixed day offset.
+</ParamField>
+
+<ParamField path="hour" type="int" default="0">
+  Hour of day to fire at. Valid range: `0`–`23`.
+</ParamField>
+
+<ParamField path="minute" type="int" default="0">
+  Minute of the hour to fire at. Valid range: `0`–`59`.
+</ParamField>
+
+<ParamField path="second" type="int" default="0">
+  Second of the minute to fire at. Valid range: `0`–`59`.
+</ParamField>
+
+<ParamField path="start_date" type="date | str">
+  The first date to trigger on. Accepts a `datetime.date` object or an ISO-format date string. Defaults to `date.today()` at construction time.
+</ParamField>
+
+<ParamField path="end_date" type="date | str">
+  Latest possible date to trigger on. The trigger returns `None` once the next calculated date would exceed this value. Must not be earlier than `start_date`.
+</ParamField>
+
+<ParamField path="timezone" type="tzinfo | str" default='"local"'>
+  Time zone used when combining the date and time into a final `datetime`. Accepts a `tzinfo` instance or an IANA timezone string. Defaults to the local system timezone.
+</ParamField>
+
+## DST handling
+
+If the configured wall-clock time does not exist on a given date (due to a DST forward shift), that date is discarded and the trigger moves on to the next interval. If the time is ambiguous (due to a DST backward shift), the earlier of the two resulting datetimes is used.
+
+<Warning>
+  Avoid setting `start_date` near the end of the month (29th–31st) when `months` is set. Months that don't have those days will be skipped entirely. Similarly, starting on February 29th with `years` set will skip non-leap years.
+</Warning>
+
+## Examples
+
+### Every month on the same day at midnight
+
+```python
+from apscheduler.triggers.calendarinterval import CalendarIntervalTrigger
+
+trigger = CalendarIntervalTrigger(months=1)
+```
+
+### Every 2 months at 10:00 AM
+
+```python
+trigger = CalendarIntervalTrigger(months=2, hour=10)
+```
+
+### Every year on the same date at noon
+
+```python
+trigger = CalendarIntervalTrigger(years=1, hour=12)
+```
+
+### Every 3 months starting from a specific date
+
+```python
+from datetime import date
+import zoneinfo
+
+trigger = CalendarIntervalTrigger(
+    months=3,
+    hour=9,
+    minute=30,
+    start_date=date(2024, 1, 15),
+    timezone=zoneinfo.ZoneInfo("Europe/London"),
+)
+```
+
+### Every 2 weeks at 8:00 AM, with an end date
+
+```python
+from datetime import date
+
+trigger = CalendarIntervalTrigger(
+    weeks=2,
+    hour=8,
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 12, 31),
+)
+```

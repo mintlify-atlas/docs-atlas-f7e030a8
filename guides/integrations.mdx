@@ -1,0 +1,321 @@
+---
+title: "Integrating APScheduler with Web Frameworks"
+description: "Integrate APScheduler with WSGI frameworks (Flask, Django) using the sync scheduler and ASGI frameworks (FastAPI, Starlette) using the async scheduler."
+---
+
+APScheduler is framework-agnostic, but the right scheduler class and startup strategy depends on whether your web server is synchronous (WSGI) or asynchronous (ASGI). WSGI servers need the synchronous `Scheduler` started in a background thread, while ASGI servers need the `AsyncScheduler` tied to the application's lifespan.
+
+<Tabs>
+  <Tab title="WSGI">
+
+## WSGI integration
+
+WSGI frameworks (Flask, Django, Falcon, plain WSGI callables) run synchronous Python. Use the synchronous `Scheduler` and call `start_in_background()` at module import time so the scheduler is running before the first request arrives.
+
+```python
+from apscheduler import Scheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.redis import RedisEventBroker
+from apscheduler.triggers.interval import IntervalTrigger
+from datetime import datetime
+from sqlalchemy.future import create_engine
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+def application(environ, start_response):
+    response_body = b"Hello, World!"
+    response_headers = [
+        ("Content-Type", "text/plain"),
+        ("Content-Length", str(len(response_body))),
+    ]
+    start_response("200 OK", response_headers)
+    return [response_body]
+
+
+engine = create_engine("postgresql+psycopg://postgres:secret@localhost/testdb")
+data_store = SQLAlchemyDataStore(engine)
+event_broker = RedisEventBroker("redis://localhost")
+scheduler = Scheduler(data_store, event_broker)
+scheduler.add_schedule(tick, IntervalTrigger(seconds=1), id="tick")
+scheduler.start_in_background()
+```
+
+Save this as `example.py`, then start it with uWSGI:
+
+```bash
+uwsgi --enable-threads --http :8080 --wsgi-file example.py
+```
+
+<Note>
+  The `--enable-threads` (or `-T`) flag is required. uWSGI disables Python threads by default, which prevents the scheduler's background thread from running. See the [uWSGI threading docs](https://uwsgi-docs.readthedocs.io/en/latest/WSGIquickstart.html#a-note-on-python-threads) for details.
+</Note>
+
+<Note>
+  `start_in_background()` registers an `atexit` hook that shuts the scheduler down gracefully when the worker process exits — no manual cleanup is needed.
+</Note>
+
+### Flask example
+
+The pattern is identical with Flask. Create the scheduler at module level, after your `Flask` app object:
+
+```python
+from flask import Flask
+from apscheduler import Scheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.redis import RedisEventBroker
+from apscheduler.triggers.interval import IntervalTrigger
+from datetime import datetime
+from sqlalchemy.future import create_engine
+
+app = Flask(__name__)
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+@app.route("/")
+def hello_world():
+    return "<p>Hello, World!</p>"
+
+
+engine = create_engine("postgresql+psycopg://postgres:secret@localhost/testdb")
+data_store = SQLAlchemyDataStore(engine)
+event_broker = RedisEventBroker("redis://localhost")
+scheduler = Scheduler(data_store, event_broker)
+scheduler.add_schedule(tick, IntervalTrigger(seconds=1), id="tick")
+scheduler.start_in_background()
+```
+
+Run with uWSGI:
+
+```bash
+uwsgi --enable-threads --http :8000 --wsgi-file wsgi_flask.py
+```
+
+### Django integration
+
+Django is a WSGI framework by default. Apply the same pattern: create a `Scheduler`, call `start_in_background()` in your `AppConfig.ready()` method so it starts exactly once per process.
+
+```python
+# myapp/apps.py
+from django.apps import AppConfig
+from apscheduler import Scheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self):
+        from .jobs import tick
+
+        scheduler = Scheduler()
+        scheduler.add_schedule(tick, IntervalTrigger(seconds=60), id="tick")
+        scheduler.start_in_background()
+```
+
+<Tip>
+  Using `AppConfig.ready()` prevents the scheduler from starting twice under Django's auto-reloader. If you start it at module level instead, set `RUN_MAIN=true` in the environment or use `--noreload`.
+</Tip>
+
+  </Tab>
+  <Tab title="ASGI">
+
+## ASGI integration
+
+ASGI servers (Uvicorn, Hypercorn, Daphne) run an async event loop. Use `AsyncScheduler` and bind its lifecycle to the app's ASGI **lifespan** scope so it starts when the server starts and stops when the server stops.
+
+### Raw ASGI (no framework)
+
+Wrap your app in a middleware function that intercepts the `lifespan` scope:
+
+```python
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+from apscheduler.triggers.interval import IntervalTrigger
+from datetime import datetime
+from sqlalchemy.ext.asyncio import create_async_engine
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+async def original_app(scope, receive, send):
+    """Trivial example of an ASGI application."""
+    if scope["type"] == "http":
+        await receive()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [[b"content-type", b"text/plain"]],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"Hello, world!",
+                "more_body": False,
+            }
+        )
+    elif scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+async def scheduler_middleware(scope, receive, send):
+    if scope["type"] == "lifespan":
+        engine = create_async_engine(
+            "postgresql+asyncpg://postgres:secret@localhost/testdb"
+        )
+        data_store = SQLAlchemyDataStore(engine)
+        event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+        async with AsyncScheduler(data_store, event_broker) as scheduler:
+            await scheduler.add_schedule(tick, IntervalTrigger(seconds=1), id="tick")
+            await scheduler.start_in_background()
+            await original_app(scope, receive, send)
+    else:
+        await original_app(scope, receive, send)
+
+
+app = scheduler_middleware
+```
+
+Run with Hypercorn:
+
+```bash
+hypercorn example:app
+```
+
+Or with Uvicorn:
+
+```bash
+uvicorn example:app
+```
+
+### FastAPI
+
+FastAPI supports lifespan context managers directly. Create the scheduler inside the `lifespan` async generator and use `async with scheduler:` to manage its lifecycle:
+
+```python
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse, Response
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    engine = create_async_engine(
+        "postgresql+asyncpg://postgres:secret@localhost/testdb"
+    )
+    data_store = SQLAlchemyDataStore(engine)
+    event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+    scheduler = AsyncScheduler(data_store, event_broker)
+
+    async with scheduler:
+        await scheduler.add_schedule(tick, IntervalTrigger(seconds=1), id="tick")
+        await scheduler.start_in_background()
+        yield
+
+
+async def root() -> Response:
+    return PlainTextResponse("Hello, world!")
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_api_route("/", root)
+```
+
+Run with Uvicorn:
+
+```bash
+uvicorn asgi_fastapi:app
+```
+
+### Starlette
+
+Starlette uses ASGI middleware classes. Intercept the `lifespan` scope in your middleware's `__call__` method:
+
+```python
+from datetime import datetime
+
+from sqlalchemy.ext.asyncio import create_async_engine
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
+from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from apscheduler import AsyncScheduler
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker
+from apscheduler.triggers.interval import IntervalTrigger
+
+
+def tick():
+    print("Hello, the time is", datetime.now())
+
+
+class SchedulerMiddleware:
+    def __init__(self, app: ASGIApp, scheduler: AsyncScheduler) -> None:
+        self.app = app
+        self.scheduler = scheduler
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            async with self.scheduler:
+                await self.scheduler.add_schedule(
+                    tick, IntervalTrigger(seconds=1), id="tick"
+                )
+                await self.scheduler.start_in_background()
+                await self.app(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+async def root(request: Request) -> Response:
+    return PlainTextResponse("Hello, world!")
+
+
+engine = create_async_engine("postgresql+asyncpg://postgres:secret@localhost/testdb")
+data_store = SQLAlchemyDataStore(engine)
+event_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)
+scheduler = AsyncScheduler(data_store, event_broker)
+routes = [Route("/", root)]
+middleware = [Middleware(SchedulerMiddleware, scheduler=scheduler)]
+app = Starlette(routes=routes, middleware=middleware)
+```
+
+Run with Uvicorn:
+
+```bash
+uvicorn asgi_starlette:app
+```
+
+  </Tab>
+</Tabs>

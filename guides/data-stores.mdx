@@ -1,0 +1,227 @@
+---
+title: "Persistent Data Stores in APScheduler"
+description: "Learn how to configure MemoryDataStore, SQLAlchemyDataStore, and MongoDBDataStore to persist schedules and jobs across process restarts."
+---
+
+A data store is where APScheduler keeps its schedules, jobs, and task metadata. By default it uses an in-memory store that loses all data when the process exits. For production deployments — where schedules must survive application restarts or crashes — you need a persistent data store backed by a relational database or MongoDB.
+
+## MemoryDataStore
+
+`MemoryDataStore` is the default. It holds all data in Python objects within the running process and requires no external dependencies or configuration.
+
+```python
+from apscheduler import AsyncScheduler
+
+# MemoryDataStore is used automatically when no data_store is passed
+async with AsyncScheduler() as scheduler:
+    await scheduler.run_until_stopped()
+```
+
+<Note>
+`MemoryDataStore` can be shared between multiple schedulers **within the same event loop**, but is not suitable for multi-process or multi-node deployments. All schedules and job results are lost when the process exits.
+</Note>
+
+Use `MemoryDataStore` for:
+- Local development and testing
+- Short-lived scripts where persistence is not needed
+- Schedulers that process jobs in-process alongside the data store
+
+## SQLAlchemyDataStore
+
+`SQLAlchemyDataStore` persists data in a relational database via SQLAlchemy. It automatically creates the required tables on first use.
+
+**Install the extra:**
+
+```bash
+pip install apscheduler[sqlalchemy]
+```
+
+**Supported databases:**
+- PostgreSQL (recommended — asyncpg or psycopg drivers)
+- MySQL (asyncmy driver)
+- SQLite (aiosqlite driver — not recommended for multi-scheduler setups due to [a known issue](https://github.com/agronholm/apscheduler/issues/959))
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `engine_or_url` | `str \| URL \| Engine \| AsyncEngine` | required | A SQLAlchemy async engine, sync engine, or connection URL string |
+| `schema` | `str \| None` | `None` | Database schema name to use instead of the default |
+
+The store inherits `serializer`, `lock_expiration_delay`, `max_concurrent_jobs`, and `retry_settings` from its base class `BaseExternalDataStore`.
+
+<Note>
+If you pass an engine instance, the data store does not manage its lifecycle. You are responsible for disposing of the engine when you are done.
+</Note>
+
+### Examples
+
+<Tabs>
+  <Tab title="PostgreSQL (asyncpg)">
+    ```python
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    data_store = SQLAlchemyDataStore(engine)
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="PostgreSQL (URL string)">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+    data_store = SQLAlchemyDataStore(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="MySQL">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+    data_store = SQLAlchemyDataStore(
+        "mysql+asyncmy://user:password@localhost/mydb"
+    )
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="With schema">
+    ```python
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://user:password@localhost/mydb"
+    )
+    data_store = SQLAlchemyDataStore(engine, schema="apscheduler")
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+</Tabs>
+
+## MongoDBDataStore
+
+`MongoDBDataStore` persists data in a MongoDB server (version 4.0 or later). It creates the appropriate indexes on startup.
+
+**Install the extra:**
+
+```bash
+pip install apscheduler[mongodb]
+```
+
+### Constructor parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `client_or_uri` | `AsyncMongoClient \| str` | required | An async PyMongo client instance or a MongoDB connection URI |
+| `database` | `str` | `"apscheduler"` | Name of the database to use |
+
+The store also inherits `serializer`, `lock_expiration_delay`, `max_concurrent_jobs`, and `retry_settings` from `BaseExternalDataStore`.
+
+<Note>
+If you pass a client instance, the data store does not manage its lifecycle. You are responsible for closing the client when you are done.
+</Note>
+
+### Examples
+
+<Tabs>
+  <Tab title="URI string">
+    ```python
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.mongodb import MongoDBDataStore
+
+    data_store = MongoDBDataStore("mongodb://localhost:27017")
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+    ```
+  </Tab>
+  <Tab title="Client instance">
+    ```python
+    from pymongo import AsyncMongoClient
+    from apscheduler import AsyncScheduler
+    from apscheduler.datastores.mongodb import MongoDBDataStore
+
+    client = AsyncMongoClient("mongodb://localhost:27017")
+    data_store = MongoDBDataStore(client, database="myapp")
+
+    async with AsyncScheduler(data_store) as scheduler:
+        await scheduler.run_until_stopped()
+
+    await client.close()
+    ```
+  </Tab>
+</Tabs>
+
+## Serializers for persistent stores
+
+Persistent stores must serialize task arguments (and other objects) to bytes before saving them. By default, APScheduler uses `pickle`, which supports the widest range of Python types but is vulnerable to injection attacks if the stored data can be tampered with.
+
+<Warning>
+Do not use the default pickle serializer if untrusted parties can modify the data store. Use `CBORSerializer` or `JSONSerializer` instead.
+</Warning>
+
+| Serializer | Extra required | Notes |
+|---|---|---|
+| `PickleSerializer` (default) | None | Best type compatibility; unsafe with untrusted stores |
+| `CBORSerializer` | `pip install apscheduler[cbor]` | Wide type support; safe alternative to pickle |
+| `JSONSerializer` | None | No extra dependencies; limited type support |
+
+```python
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.serializers.cbor import CBORSerializer
+
+data_store = SQLAlchemyDataStore(
+    "postgresql+asyncpg://user:password@localhost/mydb",
+    serializer=CBORSerializer(),
+)
+```
+
+## Startup schedules and conflict policies
+
+When using a persistent data store, schedules added at application startup will accumulate on every restart unless you handle ID conflicts. Provide a static `id` and a `conflict_policy` when calling `add_schedule`:
+
+```python
+from apscheduler import AsyncScheduler, ConflictPolicy
+from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
+from apscheduler.triggers.interval import IntervalTrigger
+
+data_store = SQLAlchemyDataStore(
+    "postgresql+asyncpg://user:password@localhost/mydb"
+)
+
+async with AsyncScheduler(data_store) as scheduler:
+    await scheduler.add_schedule(
+        my_task,
+        IntervalTrigger(minutes=5),
+        id="my-recurring-task",
+        conflict_policy=ConflictPolicy.replace,
+    )
+    await scheduler.run_until_stopped()
+```
+
+The available conflict policies are:
+
+| Policy | Behavior |
+|---|---|
+| `ConflictPolicy.replace` | Replace the existing schedule with the new one |
+| `ConflictPolicy.do_nothing` | Keep the existing schedule; discard the new one |
+| `ConflictPolicy.exception` | Raise an exception if the ID already exists |
+
+For most startup schedules, `ConflictPolicy.replace` is the correct choice — it updates the schedule definition on each deploy without creating duplicates.
